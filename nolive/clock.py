@@ -35,6 +35,10 @@ def cancel_at(date_str: str, cancel_ct: str) -> datetime:
     return at(date_str, cancel_ct)
 
 
+def record_from(date_str: str) -> datetime:
+    return at(date_str, C.RECORD_FROM_CT)
+
+
 def last_cancel_at(date_str: str) -> datetime:
     return max(cancel_at(date_str, v["cancel_ct"]) for v in C.VARIANTS)
 
@@ -73,7 +77,7 @@ def fmt(when, with_seconds: bool = True) -> str:
 def loop_interval(now: datetime) -> float:
     """Fast while the action is happening, slow the rest of the day."""
     d = now.astimezone(C.CT).strftime("%Y-%m-%d")
-    start = fire_at(d) - timedelta(seconds=150)
+    start = min(fire_at(d) - timedelta(seconds=150), record_from(d) - timedelta(seconds=30))
     end = last_cancel_at(d) + timedelta(seconds=C.TRACK_AFTER_LAST_CANCEL_S + 60)
     if start <= now <= end:
         return 0.5

@@ -59,6 +59,10 @@ SKIP_YES_AT_OR_ABOVE = _num("SKIP_YES_AT_OR_ABOVE", 98)   # words at 98c+ on the
 PAPER_DOLLARS = _num("PAPER_DOLLARS", 5.0)                # dollars of collateral per word at the limit price
 CANCEL_TIMES_CT = [x.strip() for x in _secret("CANCEL_TIMES_CT", "17:35,17:40,17:45,17:50,17:55").split(",") if x.strip()]
 
+# ---- the recording window BEFORE the fire (no-fade's recorder stops at ~5:28 PM, so we cover 5:28 -> fire) ----
+RECORD_FROM_CT = _secret("RECORD_FROM_CT", "17:28:00")
+PRE_BOOK_SECONDS = int(_num("PRE_BOOK_SECONDS", 30))      # order-book picture per word while waiting for the fire
+
 # ---- timing of the background loop ----
 POLL_SECONDS = int(_num("POLL_SECONDS", 10))              # how often we read new trades while orders rest
 BOOK_SNAPSHOT_SECONDS = int(_num("BOOK_SNAPSHOT_SECONDS", 60))   # order-book picture per word
@@ -110,6 +114,7 @@ def summary() -> str:
         "%s | PAPER ONLY | %s\n"
         "fires %s CT | qualifies: YES price below %gc | order: SELL YES at %dc (= BUY NO at %dc)\n"
         "$%g per word | cancel variants: %s\n"
+        "records books every %ds + the trade tape from %s CT (fills the gap after no-fade stops)\n"
         "instant match against the real book = taker fee | resting fills = maker (no fee on this series)"
     ) % (VERSION, SERIES, FIRE_AT_CT, SKIP_YES_AT_OR_ABOVE, LIMIT_YES_CENTS,
-         order_no_price_cents(), PAPER_DOLLARS, cancels)
+         order_no_price_cents(), PAPER_DOLLARS, cancels, PRE_BOOK_SECONDS, RECORD_FROM_CT)

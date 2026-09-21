@@ -350,6 +350,13 @@ def insert_depth(row: dict) -> None:
         """), params)
 
 
+def attach_depth_to_run(event_date: str, run_id: int) -> None:
+    """Book pictures taken before the fire have no run yet; link them once tonight's run exists."""
+    with engine().begin() as conn:
+        conn.execute(text("update nolive_depth set run_id = :r where event_date = :d and run_id is null"),
+                     {"r": run_id, "d": event_date})
+
+
 def counts() -> dict:
     out = {}
     with engine().connect() as conn:

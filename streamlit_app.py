@@ -258,7 +258,8 @@ with tab_data:
     cnt = store.counts()
     st.write("Rows saved: **%d** trades · **%d** book pictures · **%d** fills · **%d** orders" % (
         cnt["nolive_trades"], cnt["nolive_depth"], cnt["nolive_fills"], cnt["nolive_orders"]))
-    st.caption("Every trade after %s CT and a book picture every %ds are kept, so any other rule can be replayed later without waiting more nights." % (C.FIRE_AT_CT, C.BOOK_SNAPSHOT_SECONDS))
+    st.caption("Kept for replaying other ideas: a book picture of EVERY word every %ds from %s CT to the fire (no-fade stops at ~5:28), "
+        "every trade from %s CT, and after the fire a book every %ds plus every trade on EVERY word until the last cancel time." % (C.PRE_BOOK_SECONDS, C.RECORD_FROM_CT, C.RECORD_FROM_CT, C.BOOK_SNAPSHOT_SECONDS))
     fl = store.recent_fills(100)
     if fl:
         fdf = pd.DataFrame(fl)[["ts", "event_date", "market_ticker", "kind", "contracts", "price_cents", "fee_cents", "source"]]

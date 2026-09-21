@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from . import analytics, clock, config as C, engine, nofade, notify, settle, store
 from .kalshi import KalshiPublic, count_needed, market_prices, word_from_market
@@ -33,6 +33,7 @@ class Runner:
         self._sleep = sleep_fn or time.sleep
         self.notify = notifier or notify
         self.prep: dict = {}            # date -> {"event_ticker": ..., "fee": {...}}
+        self.pre: dict = {}             # date -> pre-fire recorder state
         self.days: dict = {}            # date -> in-memory state of a fired night
         self.checked_fire: set = set()  # dates where we already looked for a run in the DB
         self.handled: set = set()       # dates where the fire step is finished (fired, missed, or no event)
@@ -71,7 +72,7 @@ class Runner:
                 STATE["last_status"] = "paused"
                 return "paused"
             parts = []
-            for step in (self._maybe_prepare, self._maybe_fire, self._maybe_poll, self._maybe_settle):
+            for step in (self._maybe_record_pre, self._maybe_prepare, self._maybe_fire, self._maybe_poll, self._maybe_settle):
                 try:
                     out = step(today, now)
                     if out:
@@ -82,6 +83,80 @@ class Runner:
                     store.log_activity("error", "%s: %s" % (step.__name__, exc))
             STATE["last_status"] = " | ".join(parts)
             return STATE["last_status"]
+
+    # ------------------------------------------------------------ 0) record the gap: RECORD_FROM (5:28) -> fire (5:32:30)
+    def _maybe_record_pre(self, today: str, now: datetime):
+        """No-fade's recorder stops at ~5:28. From then until we fire, save an order-book picture of EVERY word
+        every PRE_BOOK_SECONDS. (The trade tape for the same minutes is pulled in one go right after the fire.)"""
+        if today in self.handled or today in self.days:
+            return ""
+        if now < clock.record_from(today) or now >= clock.fire_at(today):
+            return ""
+        pre = self.pre.get(today)
+        if pre is None:
+            pre = self.pre[today] = {"ticker": None, "markets": [], "last_book": None, "next_lookup": now}
+        if not pre["markets"]:
+            if now < pre["next_lookup"]:
+                return ""
+            pre["next_lookup"] = now + timedelta(seconds=60)
+            try:
+                ticker = self._find_event_ticker(today)
+                if not ticker:
+                    return "pre: no event yet"
+                pre["ticker"] = ticker
+                pre["markets"] = [m["ticker"] for m in self.client.get_markets(ticker)]
+            except Exception as exc:
+                log.warning("pre-fire lookup failed: %s", exc)
+                return ""
+        if pre["last_book"] is not None and (now - pre["last_book"]).total_seconds() < C.PRE_BOOK_SECONDS:
+            return ""
+        pre["last_book"] = now
+        limit = float(C.LIMIT_YES_CENTS)
+
+        def one(t):
+            try:
+                return t, self.client.get_orderbook(t, depth=15), self.now()
+            except Exception:
+                return t, None, None
+
+        saved = 0
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for t, book, ts in pool.map(one, list(pre["markets"])):
+                if book is None:
+                    continue
+                s = engine.book_summary(book, limit)
+                store.insert_depth({
+                    "run_id": None, "event_date": today, "market_ticker": t, "ts": ts, "kind": "pre",
+                    "best_yes_bid": s["best_yes_bid"], "best_no_bid": s["best_no_bid"],
+                    "yes_size_total": s["yes_size_total"], "no_size_total": s["no_size_total"],
+                    "yes_size_at_limit": s["yes_size_at_limit"],
+                    "book_yes": _dumps(book["yes"]), "book_no": _dumps(book["no"]),
+                })
+                saved += 1
+        return "pre-fire books: %d" % saved
+
+    def _backfill_pre_trades(self, today: str, cutoffs: dict) -> int:
+        """Save every trade from RECORD_FROM up to the moment each word's paper order went in.
+        Trades are public history, so one read per word after the fire is enough. Covers ALL words."""
+        start = clock.record_from(today).astimezone(timezone.utc)
+
+        def read(t):
+            try:
+                return t, self.client.get_trades(t, min_ts=int(start.timestamp()) - 1, max_pages=5)
+            except Exception as exc:
+                log.warning("pre-fire trades %s failed: %s", t, exc)
+                return t, []
+
+        saved = 0
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for t, trades in pool.map(read, list(cutoffs)):
+                rows = [{"trade_id": x["id"], "event_date": today, "market_ticker": t, "ts": x["ts"],
+                         "yes_price_cents": x["yes_cents"], "contracts": x["count"], "taker_side": x["taker_side"]}
+                        for x in trades if start <= x["ts"] <= cutoffs[t]]
+                store.insert_trades(rows)
+                saved += len(rows)
+        store.log_activity("pre_trades", "%s: saved %d trades from %s CT to the fire" % (today, saved, C.RECORD_FROM_CT))
+        return saved
 
     # ------------------------------------------------------------ 1) prepare
     def _find_event_ticker(self, today: str):
@@ -126,7 +201,7 @@ class Runner:
             return ""
         prep = {"event_ticker": None, "fee": self._fee_info()}
         try:
-            prep["event_ticker"] = self._find_event_ticker(today)
+            prep["event_ticker"] = (self.pre.get(today) or {}).get("ticker") or self._find_event_ticker(today)
         except Exception as exc:
             log.warning("event lookup failed: %s", exc)
             prep["error"] = str(exc)
@@ -259,6 +334,11 @@ class Runner:
             }
             if not r["q"]["qualified"]:
                 store.insert_market(base)
+                # no order, but keep recording its book and trades after the fire (for testing other ideas later)
+                day["markets"][t] = {"ticker": t, "word": r["word"], "is_counting": base["is_counting"],
+                                     "yes_price": r["q"]["price"], "placed_at": fired_at, "intended": 0.0, "fills": [],
+                                     "cursor": fired_at, "last_book_at": fired_at - timedelta(seconds=C.BOOK_SNAPSHOT_SECONDS),
+                                     "written": {}, "orders": {}}
                 continue
             _, book, book_ts, err = by_ticker[t]
             if err:
@@ -296,6 +376,7 @@ class Runner:
                 instant_ct += sum(f["contracts"] for f in tk)
             day["markets"][t] = mk
         self._attach_order_ids(day)
+        store.attach_depth_to_run(today, run["id"])
         store.update_run(run["id"], status="polling", markets_seen=len(rows), qualified=len(qualified),
                          skipped=len(rows) - len(qualified),
                          notes=("late %.1fs; " % (run.get("late_seconds") or 0)) + ("%d book errors" % book_errors if book_errors else ""))
@@ -310,6 +391,13 @@ class Runner:
             % (today, clock.fmt(fired_at), (run.get("late_seconds") or 0), C.FIRE_AT_CT, len(rows), len(qualified),
                C.SKIP_YES_AT_OR_ABOVE, len(skipped), C.LIMIT_YES_CENTS, C.PAPER_DOLLARS, intended,
                instant_words, instant_ct, ", ".join(v["label"].replace(" PM", "") for v in C.VARIANTS)))
+        try:      # after the Telegram message so nothing waits on it: save the 5:28 -> fire tape for every word
+            cutoffs = dict((r["m"]["ticker"], day["markets"][r["m"]["ticker"]]["placed_at"] if r["m"]["ticker"] in day["markets"] else fired_at)
+                           for r in rows)
+            self._backfill_pre_trades(today, cutoffs)
+        except Exception as exc:
+            log.exception("pre-fire trade backfill failed")
+            store.log_activity("error", "pre-fire trade backfill: %s" % exc)
         return "fired: %d qualified, %d instant" % (len(qualified), instant_words)
 
     def _attach_order_ids(self, day: dict) -> None:
@@ -345,6 +433,14 @@ class Runner:
                 "fills": [f for f in fills if f["market_ticker"] == t], "cursor": placed,
                 "last_book_at": placed, "written": {}, "orders": dict((o["variant_id"], o) for o in mine),
             }
+        fired_at = run.get("fired_at") or clock.now_utc()
+        for m in store.markets_for_run(run["id"]):
+            if m.get("qualified") or m["market_ticker"] in day["markets"]:
+                continue
+            day["markets"][m["market_ticker"]] = {
+                "ticker": m["market_ticker"], "word": m.get("word"), "is_counting": bool(m.get("is_counting")),
+                "yes_price": m.get("yes_price_cents"), "placed_at": fired_at, "intended": 0.0, "fills": [],
+                "cursor": fired_at, "last_book_at": fired_at, "written": {}, "orders": {}}
         self.days[today] = day
         store.log_activity("resume", "%s: rebuilt %d words from the database" % (today, len(day["markets"])))
 

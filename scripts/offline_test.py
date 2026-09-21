@@ -174,9 +174,10 @@ BOOKS = {
     "GOLD": {"yes": [(95, 10), (96, 4)], "no": []},
 }
 TAPE = {
-    "OIL": [(60, 60.0, 4, "yes"), (400, 99.0, 200, "yes")],
+    "OIL": [(-200, 40.0, 5, "yes"), (60, 60.0, 4, "yes"), (400, 99.0, 200, "yes")],
+    "NVDA": [(-100, 99.0, 3, "yes"), (100, 99.0, 4, "no")],
     "DRONE": [(50, 30.0, 5, "yes")],
-    "TRUMP5": [(30, 58.0, 3, "yes")],
+    "TRUMP5": [(-30, 45.0, 2, "no"), (30, 58.0, 3, "yes")],
     "GOLD": [],
 }
 RESULTS = {"TRUMP5": "no", "GOLD": "yes"}       # OIL / DRONE come from the no-fade tables
@@ -225,7 +226,7 @@ class FakeNotifier:
         self.sent.append(text_)
 
 
-now_ref = [T - timedelta(seconds=90)]          # 5:31:00 PM CT
+now_ref = [clock.record_from(DATE).astimezone(timezone.utc) - timedelta(seconds=30)]     # 5:27:30 PM CT
 
 
 def advance(seconds):
@@ -276,7 +277,20 @@ check("no fee on maker fills", all(float(o["maker_fee_cents"] or 0) == 0 for o i
 fills = store.fills_for_run(run["id"])
 check("fills: OIL 2, DRONE 1, TRUMP5 1, GOLD 2", len(fills) == 6, str(len(fills)))
 trades_n = store.counts()["nolive_trades"]
-check("raw tape stored once per trade (no duplicates)", trades_n == 4, str(trades_n))
+check("raw tape stored once per trade: 4 after the fire + 3 in the gap + 1 after the fire on a skipped word", trades_n == 8, str(trades_n))
+with store.engine().begin() as conn:
+    pre_tr = conn.execute(text("select count(*) from nolive_trades where market_ticker = :m"), {"m": EVENT + "-NVDA"}).scalar()
+    pre_rows = conn.execute(text("select count(*), count(distinct market_ticker) from nolive_depth where kind = 'pre'")).one()
+    orphan = conn.execute(text("select count(*) from nolive_depth where run_id is null")).scalar()
+check("NVDA (not ordered): its gap trade AND its post-fire trade are both saved", pre_tr == 2, str(pre_tr))
+with store.engine().begin() as conn:
+    poll_words = conn.execute(text("select count(distinct market_ticker) from nolive_depth where kind = 'poll'")).scalar()
+    nvda_poll = conn.execute(text("select count(*) from nolive_depth where kind = 'poll' and market_ticker = :m"), {"m": EVENT + "-NVDA"}).scalar()
+check("after the fire, books are kept for ALL 7 words (ordered or not)", poll_words == 7, str(poll_words))
+check("a skipped word gets about one book a minute until 5:55", 20 <= nvda_poll <= 26, str(nvda_poll))
+check("gap books: every word (7), about every 30s from 5:28", pre_rows[1] == 7 and 56 <= pre_rows[0] <= 70, str(tuple(pre_rows)))
+check("gap books linked to tonight's run after the fire", orphan == 0, str(orphan))
+check("gap trades never became fills (they happened before our order)", len([f for f in store.fills_for_run(run["id"]) if f["ref"] in ("trade:%s-OIL#0" % EVENT,)]) == 0)
 depth_n = store.counts()["nolive_depth"]
 check("book pictures recorded every minute (4 words x ~24)", depth_n > 60, str(depth_n))
 check("Telegram: fire + close messages", len(notifier.sent) == 2 and "fired" in notifier.sent[0] and "cancelled" in notifier.sent[1], str([x[:30] for x in notifier.sent]))
