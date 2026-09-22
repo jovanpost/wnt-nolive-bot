@@ -255,7 +255,7 @@ class Runner:
         return {
             "event_date": today, "event_ticker": ticker, "status": status, "scheduled_at": T,
             "fired_at": fired_at, "late_seconds": late, "limit_yes_cents": C.LIMIT_YES_CENTS,
-            "dollars": C.PAPER_DOLLARS, "skip_at_or_above": C.SKIP_YES_AT_OR_ABOVE,
+            "dollars": C.PAPER_DOLLARS, "qualify_max_yes_cents": C.QUALIFY_MAX_YES_CENTS,
             "cancel_times": ",".join(C.CANCEL_TIMES_CT), "fee_type": fee.get("fee_type"),
             "fee_multiplier": fee.get("fee_multiplier"), "maker_rate": fee.get("maker_rate"),
             "version": C.VERSION, "notes": note,
@@ -291,13 +291,16 @@ class Runner:
             return "another instance already fired"
 
         limit = float(C.LIMIT_YES_CENTS)
-        intended = engine.contracts_for(C.PAPER_DOLLARS, limit)
+        sized = engine.order_size(C.PAPER_DOLLARS, limit, C.MAX_CONTRACTS_PER_WORD)
+        intended, size_capped = sized["contracts"], sized["capped"]
         rows = []
         for m in markets:
             last, bid, ask = market_prices(m)
-            q = engine.qualify(last, bid, ask, m.get("status"), C.SKIP_YES_AT_OR_ABOVE)
             word = word_from_market(m)
-            rows.append({"m": m, "last": last, "bid": bid, "ask": ask, "q": q, "word": word})
+            counting = count_needed(word) >= 2 and C.EXCLUDE_COUNTING_WORDS
+            q = engine.qualify(last, bid, ask, m.get("status"), C.QUALIFY_MAX_YES_CENTS, counting)
+            rows.append({"m": m, "last": last, "bid": bid, "ask": ask, "q": q, "word": word,
+                        "is_counting": count_needed(word) >= 2})
         qualified = [r for r in rows if r["q"]["qualified"]]
 
         def book_for(r):
@@ -323,7 +326,7 @@ class Runner:
             pre = nofade.pre_book(t, today, clock.fire_at(today)) if r["q"]["qualified"] else None
             base = {
                 "run_id": run["id"], "event_date": today, "market_ticker": t, "word": r["word"],
-                "title": m.get("title"), "is_counting": count_needed(r["word"]) >= 2,
+                "title": m.get("title"), "is_counting": r["is_counting"],
                 "count_needed": count_needed(r["word"]), "market_status": m.get("status"),
                 "last_price_cents": r["last"], "yes_bid_cents": r["bid"], "yes_ask_cents": r["ask"],
                 "price_basis": r["q"]["basis"], "yes_price_cents": r["q"]["price"],
@@ -363,7 +366,7 @@ class Runner:
                          "word": r["word"], "variant_id": v["id"], "cancel_ct": v["cancel_ct"], "cancel_at": ca,
                          "limit_yes_cents": C.LIMIT_YES_CENTS, "contracts": intended, "dollars": C.PAPER_DOLLARS,
                          "placed_at": book_ts, "yes_price_at_place": r["q"]["price"],
-                         "is_counting": base["is_counting"], "status": "resting"}
+                         "is_counting": base["is_counting"], "status": "resting", "size_capped": bool(size_capped)}
                 store.insert_order(order)
                 mk["orders"][v["id"]] = order
             tk = engine.taker_fills(book, limit, intended, day["fee_mult"])
@@ -386,11 +389,12 @@ class Runner:
         store.log_activity("fire", "%s: %d words, %d qualified, %d instant" % (today, len(rows), len(qualified), instant_words))
         skipped = [r for r in rows if not r["q"]["qualified"]]
         self.notify.send(
-            "🔔 WNT post-cold-open %s\nfired %s CT (%.1fs after %s)\n%d words | %d qualify (YES under %gc) | %d skipped\n"
-            "SELL YES %dc on each, $%g per word (%.2f contracts)\ninstant (taker) fills: %d words, %.1f contracts\nresting on the rest until %s"
+            "🔔 WNT post-cold-open %s\n fired %s CT (%.1fs after %s)\n%d words | %d qualify (YES at or below %gc, counting words excluded) | %d skipped\n"
+            "SELL YES %dc on each, $%g per word (%.2f contracts%s)\ninstant (taker) fills: %d words, %.1f contracts\nresting on the rest until %s"
             % (today, clock.fmt(fired_at), (run.get("late_seconds") or 0), C.FIRE_AT_CT, len(rows), len(qualified),
-               C.SKIP_YES_AT_OR_ABOVE, len(skipped), C.LIMIT_YES_CENTS, C.PAPER_DOLLARS, intended,
-               instant_words, instant_ct, ", ".join(v["label"].replace(" PM", "") for v in C.VARIANTS)))
+               C.QUALIFY_MAX_YES_CENTS, len(skipped), C.LIMIT_YES_CENTS, C.PAPER_DOLLARS, intended,
+               " -- CAPPED" if size_capped else "", instant_words, instant_ct,
+               ", ".join(v["label"].replace(" PM", "") for v in C.VARIANTS)))
         try:      # after the Telegram message so nothing waits on it: save the 5:28 -> fire tape for every word
             cutoffs = dict((r["m"]["ticker"], day["markets"][r["m"]["ticker"]]["placed_at"] if r["m"]["ticker"] in day["markets"] else fired_at)
                            for r in rows)

@@ -46,17 +46,23 @@ def _num(name: str, default: float) -> float:
         return default
 
 
-VERSION = "wnt-nolive-v1.0"
+VERSION = "wnt-nolive-v2.0.0"    # bump this every release; it shows on the dashboard and in Telegram
 CT = ZoneInfo("America/Chicago")
 
 SERIES = _secret("SERIES", "KXWORLDNEWSMENTION")
 
 # ---- the rules (frozen: change them in Streamlit Secrets, not in code) ----
+# v2: backtested on 40 nights of Kalshi's own public trade history (independent of our data). The old
+# 1c-97c / sell-55c rule only made money on the words that were already cheap when it fired; everything
+# priced higher lost consistently across most nights. A top-of-scale version (buy YES on likely words)
+# was tested two ways and found no edge either way. This version narrows to the zone that showed one.
 FIRE_AT_CT = _secret("FIRE_AT_CT", "17:32:30")            # when the paper orders go in
 FIRE_GRACE_S = int(_num("FIRE_GRACE_S", 120))             # if the app wakes late, still fire up to this many seconds late
-LIMIT_YES_CENTS = int(_num("LIMIT_YES_CENTS", 55))        # Sell YES at 55c  (= Buy NO at 45c)
-SKIP_YES_AT_OR_ABOVE = _num("SKIP_YES_AT_OR_ABOVE", 98)   # words at 98c+ on the YES side do not qualify
-PAPER_DOLLARS = _num("PAPER_DOLLARS", 5.0)                # dollars of collateral per word at the limit price
+LIMIT_YES_CENTS = int(_num("LIMIT_YES_CENTS", 30))        # Sell YES at 30c  (= Buy NO at 70c)
+QUALIFY_MAX_YES_CENTS = _num("QUALIFY_MAX_YES_CENTS", 30) # a word only qualifies if YES is AT OR BELOW this
+EXCLUDE_COUNTING_WORDS = _flag("EXCLUDE_COUNTING_WORDS", True)  # "3+ times" words behave differently; skip them entirely
+PAPER_DOLLARS = _num("PAPER_DOLLARS", 3.0)                # dollars of collateral requested per word, BEFORE the cap below
+MAX_CONTRACTS_PER_WORD = _num("MAX_CONTRACTS_PER_WORD", 50)   # hard cap regardless of what the dollar formula asks for
 CANCEL_TIMES_CT = [x.strip() for x in _secret("CANCEL_TIMES_CT", "17:35,17:40,17:45,17:50,17:55").split(",") if x.strip()]
 
 # ---- the recording window BEFORE the fire (no-fade's recorder stops at ~5:28 PM, so we cover 5:28 -> fire) ----
@@ -108,13 +114,20 @@ def order_no_price_cents() -> int:
     return 100 - LIMIT_YES_CENTS
 
 
+def sized_contracts() -> dict:
+    from . import engine
+    return engine.order_size(PAPER_DOLLARS, LIMIT_YES_CENTS, MAX_CONTRACTS_PER_WORD)
+
+
 def summary() -> str:
     cancels = ", ".join(v["label"] for v in VARIANTS)
+    sz = sized_contracts()
     return (
         "%s | PAPER ONLY | %s\n"
-        "fires %s CT | qualifies: YES price below %gc | order: SELL YES at %dc (= BUY NO at %dc)\n"
-        "$%g per word | cancel variants: %s\n"
+        "fires %s CT | qualifies: YES price at or below %gc (counting words excluded) | order: SELL YES at %dc (= BUY NO at %dc)\n"
+        "$%g per word -> %.2f contracts%s, cap %g | cancel variants: %s\n"
         "records books every %ds + the trade tape from %s CT (fills the gap after no-fade stops)\n"
         "instant match against the real book = taker fee | resting fills = maker (no fee on this series)"
-    ) % (VERSION, SERIES, FIRE_AT_CT, SKIP_YES_AT_OR_ABOVE, LIMIT_YES_CENTS,
-         order_no_price_cents(), PAPER_DOLLARS, cancels, PRE_BOOK_SECONDS, RECORD_FROM_CT)
+    ) % (VERSION, SERIES, FIRE_AT_CT, QUALIFY_MAX_YES_CENTS, LIMIT_YES_CENTS,
+         order_no_price_cents(), PAPER_DOLLARS, sz["contracts"], " (CAPPED)" if sz["capped"] else "",
+         MAX_CONTRACTS_PER_WORD, cancels, PRE_BOOK_SECONDS, RECORD_FROM_CT)

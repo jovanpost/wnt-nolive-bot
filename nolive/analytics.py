@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from . import config as C
 
-BUCKETS = [(0, 10), (10, 25), (25, 45), (45, 55), (55, 75), (75, 98)]
+# v2: qualifying is now capped at 30c, so the old 0-98c buckets would mostly sit empty. Finer resolution
+# inside the zone the backtest actually found an edge in.
+BUCKETS = [(0, 5), (5, 10), (10, 15), (15, 20), (20, 25), (25, 31)]
 
 
 def _f(x, default=0.0):

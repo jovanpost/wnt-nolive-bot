@@ -28,7 +28,7 @@ create table if not exists nolive_runs (
   late_seconds    double precision,
   limit_yes_cents int not null,
   dollars         double precision not null,
-  skip_at_or_above double precision not null,
+  qualify_max_yes_cents double precision not null,
   cancel_times    text,
   markets_seen    int not null default 0,
   qualified       int not null default 0,
@@ -92,6 +92,7 @@ create table if not exists nolive_orders (
   placed_at          timestamptz not null,
   yes_price_at_place double precision,
   is_counting        boolean not null default false,
+  size_capped        boolean not null default false,
   status             text not null default 'resting',
   taker_contracts    double precision not null default 0,
   maker_contracts    double precision not null default 0,
@@ -157,3 +158,9 @@ create table if not exists nolive_depth (
   book_no              text
 );
 create index if not exists nolive_depth_idx on nolive_depth (event_date, market_ticker, ts);
+
+-- v2: the 30c-qualify rule added a contract cap. Patches an already-deployed table (create-if-not-exists
+-- above only helps a brand-new install); harmless to run again.
+alter table nolive_orders add column if not exists size_capped boolean not null default false;
+-- v2 also renamed this column: it now records the AT-OR-BELOW qualify cap, not a skip-at-or-above line.
+alter table nolive_runs rename column skip_at_or_above to qualify_max_yes_cents;

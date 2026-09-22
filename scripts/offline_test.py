@@ -58,54 +58,59 @@ check("maker fee is 0 when the series has none", fees.maker_fee_cents(10, 55, 0.
 check("maker fee 0.0175 x 10 x .55 x .45 = 5c", fees.maker_fee_cents(10, 55, 0.0175) == 5)
 
 # ------------------------------------------------------------------ 2) qualify
-print("2) qualify")
-check("YES 70c qualifies", engine.qualify(70, 65, 72, "active", 98)["qualified"])
-check("YES 97c qualifies", engine.qualify(97, 96, 98, "active", 98)["qualified"])
-check("YES 1c qualifies", engine.qualify(1, 1, 2, "active", 98)["qualified"])
-check("YES 98c does not", not engine.qualify(98, 97, 99, "active", 98)["qualified"])
-check("YES 99c does not", not engine.qualify(99, 98, 100, "active", 98)["qualified"])
-check("bid 98+ disqualifies even if last is stale", not engine.qualify(60, 98, 99, "active", 98)["qualified"])
-check("no trade -> falls back to bid", engine.qualify(None, 40, 50, "active", 98)["basis"] == "bid")
-check("no price at all -> skip", engine.qualify(None, None, None, "active", 98)["reason"] == "no price")
-check("closed market -> skip", not engine.qualify(50, 49, 51, "closed", 98)["qualified"])
-check("half-cent 97.5 qualifies", engine.qualify(97.5, 97, 98, "active", 98)["qualified"])
+print("2) qualify (v2: 30c-or-below, counting words excluded)")
+check("YES 20c qualifies", engine.qualify(20, 18, 22, "active", 30)["qualified"])
+check("YES 30c qualifies (at the cap)", engine.qualify(30, 29, 31, "active", 30)["qualified"])
+check("YES 1c qualifies", engine.qualify(1, 1, 2, "active", 30)["qualified"])
+check("YES 31c does not", not engine.qualify(31, 30, 32, "active", 30)["qualified"])
+check("YES 70c does not", not engine.qualify(70, 65, 72, "active", 30)["qualified"])
+check("bid above cap disqualifies even if last is stale", not engine.qualify(20, 32, 33, "active", 30)["qualified"])
+check("no trade -> falls back to bid", engine.qualify(None, 20, 25, "active", 30)["basis"] == "bid")
+check("no price at all -> skip", engine.qualify(None, None, None, "active", 30)["reason"] == "no price")
+check("closed market -> skip", not engine.qualify(20, 19, 21, "closed", 30)["qualified"])
+check("half-cent 29.5 qualifies", engine.qualify(29.5, 29, 30, "active", 30)["qualified"])
+check("counting word excluded even at a cheap price", engine.qualify(10, 9, 11, "active", 30, True)["reason"] == "counting word (excluded)")
+check("counting word flag off -> normal price rule applies", engine.qualify(10, 9, 11, "active", 30, False)["qualified"])
 
 # ------------------------------------------------------------------ 3) engine: taker / maker / money
 print("3) engine")
-check("contracts $5 @ sell YES 55c = 11.11", engine.contracts_for(5, 55) == 11.11)
-book = {"yes": [(20, 5), (55, 4), (60, 3), (75, 100)], "no": [(20, 7), (45, 2), (50, 1)]}
-s = engine.book_summary(book, 55)
+check("contracts $3 @ sell YES 30c = 4.29", engine.contracts_for(3, 30) == 4.29)
+check("order_size: small request is not capped", engine.order_size(3, 30, 50) == {"contracts": 4.29, "capped": False, "raw": 4.29})
+sz_big = engine.order_size(500, 30, 50)
+check("order_size: big request gets capped at 50", sz_big["contracts"] == 50 and sz_big["capped"] and close(sz_big["raw"], 714.29, 0.01))
+book = {"yes": [(10, 5), (35, 4), (40, 3), (75, 100)], "no": [(20, 7), (65, 2), (70, 1)]}
+s = engine.book_summary(book, 30)
 check("size at/above limit", s["yes_size_at_limit"] == 107)
-check("queue ahead = NO bids >= 45", s["queue_ahead"] == 3)
-tf = engine.taker_fills(book, 55, 11.11)
-check("taker: best bid first, one level", len(tf) == 1 and tf[0]["price_cents"] == 75 and tf[0]["contracts"] == 11.11)
-check("taker fee on 11.11 @75c = 15c", tf[0]["fee_cents"] == 15)
-tf2 = engine.taker_fills({"yes": [(96, 4), (95, 10)]}, 55, 11.11)
-check("taker: walks two levels", [f["price_cents"] for f in tf2] == [96, 95] and close(sum(f["contracts"] for f in tf2), 11.11, 1e-6))
-check("taker: nothing below limit", engine.taker_fills({"yes": [(50, 100)]}, 55, 5) == [])
+check("queue ahead = NO bids >= 70", s["queue_ahead"] == 1)
+tf = engine.taker_fills(book, 30, 4.29)
+check("taker: best bid first, one level", len(tf) == 1 and tf[0]["price_cents"] == 75 and tf[0]["contracts"] == 4.29)
+check("taker fee on 4.29 @75c = 6c", tf[0]["fee_cents"] == 6)
+tf2 = engine.taker_fills({"yes": [(36, 2), (35, 10)]}, 30, 4.29)
+check("taker: walks two levels", [f["price_cents"] for f in tf2] == [36, 35] and close(sum(f["contracts"] for f in tf2), 4.29, 1e-6))
+check("taker: nothing below limit", engine.taker_fills({"yes": [(25, 100)]}, 30, 5) == [])
 tr = [
-    {"id": "a", "ts": T + timedelta(seconds=5), "yes_cents": 55.0, "count": 10, "taker_side": "yes"},
-    {"id": "b", "ts": T + timedelta(seconds=30), "yes_cents": 60.0, "count": 4, "taker_side": "no"},
-    {"id": "c", "ts": T + timedelta(seconds=60), "yes_cents": 56.0, "count": 3, "taker_side": "yes"},
+    {"id": "a", "ts": T + timedelta(seconds=5), "yes_cents": 30.0, "count": 10, "taker_side": "yes"},
+    {"id": "b", "ts": T + timedelta(seconds=30), "yes_cents": 35.0, "count": 4, "taker_side": "no"},
+    {"id": "c", "ts": T + timedelta(seconds=60), "yes_cents": 31.0, "count": 3, "taker_side": "yes"},
     {"id": "d", "ts": T + timedelta(seconds=400), "yes_cents": 99.0, "count": 200, "taker_side": "yes"},
     {"id": "e", "ts": T - timedelta(seconds=5), "yes_cents": 99.0, "count": 200, "taker_side": "yes"},
     {"id": "f", "ts": T + timedelta(seconds=5000), "yes_cents": 99.0, "count": 200, "taker_side": "yes"},
 ]
-mf = engine.maker_fills(tr, T, T + timedelta(seconds=1400), 55, 8.0)
+mf = engine.maker_fills(tr, T, T + timedelta(seconds=1400), 30, 8.0)
 check("maker: strictly-above only, buyer must be the taker, inside the window",
       [f["ref"] for f in mf] == ["trade:c", "trade:d"] and [f["contracts"] for f in mf] == [3.0, 5.0], str(mf))
 fills = [
-    {"kind": "taker", "ts": T, "contracts": 4.0, "price_cents": 96.0, "fee_cents": 2},
-    {"kind": "maker", "ts": T + timedelta(seconds=100), "contracts": 3.0, "price_cents": 55.0, "fee_cents": 0},
-    {"kind": "maker", "ts": T + timedelta(seconds=500), "contracts": 2.0, "price_cents": 55.0, "fee_cents": 0},
+    {"kind": "taker", "ts": T, "contracts": 4.0, "price_cents": 71.0, "fee_cents": 2},
+    {"kind": "maker", "ts": T + timedelta(seconds=100), "contracts": 3.0, "price_cents": 30.0, "fee_cents": 0},
+    {"kind": "maker", "ts": T + timedelta(seconds=500), "contracts": 2.0, "price_cents": 30.0, "fee_cents": 0},
 ]
 ag = engine.aggregate(fills, T + timedelta(seconds=150))
 check("aggregate respects the cancel time", ag["filled_contracts"] == 7.0 and ag["taker_contracts"] == 4.0 and ag["maker_contracts"] == 3.0)
-check("risk = n x (100 - price)", close(ag["risk_cents"], 4 * 4 + 3 * 45))
+check("risk = n x (100 - price)", close(ag["risk_cents"], 4 * 29 + 3 * 70))
 sm_no = engine.settle(fills, T + timedelta(seconds=150), "no")
-check("word NOT said: keep the price, fees off", close(sm_no["pnl_cents"], 4 * 96 - 2 + 3 * 55))
+check("word NOT said: keep the price, fees off", close(sm_no["pnl_cents"], 4 * 71 - 2 + 3 * 30))
 sm_yes = engine.settle(fills, T + timedelta(seconds=150), "yes")
-check("word said: lose 100 - price, fees off", close(sm_yes["pnl_cents"], -4 * 4 - 2 - 3 * 45))
+check("word said: lose 100 - price, fees off", close(sm_yes["pnl_cents"], -4 * 29 - 2 - 3 * 70))
 check("void = zero", engine.settle(fills, T, "void")["pnl_cents"] == 0.0)
 
 # ------------------------------------------------------------------ 4) kalshi parsers
@@ -124,12 +129,12 @@ check("count_needed", kalshi.count_needed("Iran (3+ times)") == 3 and kalshi.cou
 
 
 # ------------------------------------------------------------------ 5) a whole fake night
-print("5) whole night, fake Kalshi")
+print("5) whole night, fake Kalshi (v2 rule: 30c-or-below, counting words excluded, $3 -> 4.29ct, cap 50)")
 if PG:      # start clean: drop our tables and the fake no-fade copies
     with store.engine().begin() as conn:
-        for t in ("nolive_depth", "nolive_trades", "nolive_fills", "nolive_orders", "nolive_markets", "nolive_runs",
-                  "nolive_activity", "nolive_state", "days", "orders", "depth"):
-            conn.execute(text("drop table if exists %s cascade" % t))
+        for tname in ("nolive_depth", "nolive_trades", "nolive_fills", "nolive_orders", "nolive_markets", "nolive_runs",
+                      "nolive_activity", "nolive_state", "days", "orders", "depth"):
+            conn.execute(text("drop table if exists %s cascade" % tname))
 store.init_db()
 with store.engine().begin() as conn:      # tables that the no-fade bot owns (fake copies, read-only for us)
     if PG:   # same column types as the real no-fade schema
@@ -142,8 +147,7 @@ with store.engine().begin() as conn:      # tables that the no-fade bot owns (fa
         conn.execute(text("create table depth (id integer primary key autoincrement, ts text, event_date text, market_ticker text, best_yes_bid integer, best_no_bid integer)"))
     conn.execute(text("insert into days values (:d, :e)"), {"d": DATE, "e": EVENT})
     conn.execute(text("insert into orders (event_date, market_ticker, result) values (:d, :m, :r)"), {"d": DATE, "m": EVENT + "-OIL", "r": "yes"})
-    conn.execute(text("insert into orders (event_date, market_ticker, result) values (:d, :m, :r)"), {"d": DATE, "m": EVENT + "-DRONE", "r": "no"})
-    conn.execute(text("insert into depth (ts, event_date, market_ticker, best_yes_bid, best_no_bid) values (:t, :d, :m, 22, 75)"),
+    conn.execute(text("insert into depth (ts, event_date, market_ticker, best_yes_bid, best_no_bid) values (:t, :d, :m, 18, 78)"),
                  {"t": (T - timedelta(minutes=4)) if PG else (T - timedelta(minutes=4)).isoformat(), "d": DATE, "m": EVENT + "-OIL"})
 
 
@@ -159,28 +163,26 @@ def m(tk, word, last, bid, ask, status="active"):
 
 
 MARKETS = [
-    m("OIL", "Oil / Gas", 20, 18, 22),
-    m("DRONE", "Drone", 70, 65, 72),
-    m("NVDA", "Nvidia", 99, 98, 100),
-    m("TRUMP5", "Trump (5+ times)", 40, 38, 42),
-    m("HELI", "Helicopter", None, None, None),
+    m("OIL", "Oil / Gas", 20, 18, 22),        # qualifies: 20c <= 30c cap
+    m("DRONE", "Drone", 70, 65, 72),          # too expensive under v2 (was fine under the old 98c rule)
+    m("NVDA", "Nvidia", 99, 98, 100),         # too expensive
+    m("TRUMP5", "Trump (5+ times)", 20, 18, 22),  # cheap enough on price alone, but a counting word: excluded
+    m("HELI", "Helicopter", None, None, None),    # no price
     m("CLOSED", "Closed", 50, 49, 51, status="closed"),
-    m("GOLD", "Gold", 96, 95, 97),
+    m("ICE", "ICE", 25, 23, 27),              # qualifies: 25c <= 30c cap
 ]
 BOOKS = {
-    "OIL": {"yes": [(10, 50)], "no": [(70, 30)]},
-    "DRONE": {"yes": [(60, 3), (75, 100)], "no": []},
-    "TRUMP5": {"yes": [(30, 5)], "no": [(60, 5)]},
-    "GOLD": {"yes": [(95, 10), (96, 4)], "no": []},
+    "OIL": {"yes": [(10, 50)], "no": [(65, 2), (70, 1)]},
+    "ICE": {"yes": [(35, 4)], "no": [(60, 3)]},
 }
 TAPE = {
-    "OIL": [(-200, 40.0, 5, "yes"), (60, 60.0, 4, "yes"), (400, 99.0, 200, "yes")],
+    "OIL": [(-200, 40.0, 5, "yes"), (60, 40.0, 4, "yes"), (400, 99.0, 200, "yes")],
+    "ICE": [(-150, 28.0, 3, "yes"), (50, 32.0, 2, "yes")],
     "NVDA": [(-100, 99.0, 3, "yes"), (100, 99.0, 4, "no")],
-    "DRONE": [(50, 30.0, 5, "yes")],
     "TRUMP5": [(-30, 45.0, 2, "no"), (30, 58.0, 3, "yes")],
-    "GOLD": [],
+    "DRONE": [], "HELI": [], "CLOSED": [],
 }
-RESULTS = {"TRUMP5": "no", "GOLD": "yes"}       # OIL / DRONE come from the no-fade tables
+RESULTS = {"ICE": "no"}       # OIL's result comes from the no-fade fake table above; only ICE needs Kalshi
 
 
 class FakeKalshi:
@@ -253,46 +255,47 @@ while now_ref[0] < end:
 
 run = store.get_run(DATE)
 check("run exists and is closed", run is not None and run["status"] == "closed", str(run and run["status"]))
-check("7 words seen / 4 qualified / 3 skipped", (run["markets_seen"], run["qualified"], run["skipped"]) == (7, 4, 3), str((run["markets_seen"], run["qualified"], run["skipped"])))
+check("7 words seen / 2 qualified / 5 skipped", (run["markets_seen"], run["qualified"], run["skipped"]) == (7, 2, 5), str((run["markets_seen"], run["qualified"], run["skipped"])))
 check("fired exactly at 5:32:30", run["late_seconds"] is not None and run["late_seconds"] < 1.0, str(run["late_seconds"]))
 check("fee type stored from Kalshi", run["fee_type"] == "quadratic" and run["maker_rate"] == 0.0)
 
 mk = dict((x["market_ticker"].split("-")[-1], x) for x in store.markets_for_run(run["id"]))
-check("skip reasons recorded", mk["NVDA"]["skip_reason"].startswith("YES 99") and mk["HELI"]["skip_reason"] == "no price" and "not active" in mk["CLOSED"]["skip_reason"])
-check("counting word flagged, still traded", mk["TRUMP5"]["is_counting"] in (1, True) and mk["TRUMP5"]["qualified"] in (1, True))
-check("pre-fire book read from no-fade depth", mk["OIL"]["pre_yes_bid_cents"] == 22 and mk["OIL"]["pre_no_bid_cents"] == 75)
-check("queue ahead recorded (TRUMP5: NO bid 60 >= 45)", close(mk["TRUMP5"]["queue_ahead"], 5))
+check("skip reasons recorded: too expensive", mk["NVDA"]["skip_reason"] == "YES 99c > 30c cap" and mk["DRONE"]["skip_reason"] == "YES 70c > 30c cap", str((mk["NVDA"]["skip_reason"], mk["DRONE"]["skip_reason"])))
+check("skip reasons recorded: no price / closed", mk["HELI"]["skip_reason"] == "no price" and "not active" in mk["CLOSED"]["skip_reason"])
+check("counting word excluded even though its price (20c) would qualify", mk["TRUMP5"]["skip_reason"] == "counting word (excluded)" and mk["TRUMP5"]["is_counting"] in (1, True) and mk["TRUMP5"]["qualified"] in (0, False), str(mk["TRUMP5"]))
+check("OIL and ICE qualify", mk["OIL"]["qualified"] in (1, True) and mk["ICE"]["qualified"] in (1, True))
+check("pre-fire book read from no-fade depth", mk["OIL"]["pre_yes_bid_cents"] == 18 and mk["OIL"]["pre_no_bid_cents"] == 78)
+check("queue ahead recorded (OIL: NO bid 70 >= 70c)", close(mk["OIL"]["queue_ahead"], 1) and close(mk["ICE"]["queue_ahead"], 0), str((mk["OIL"]["queue_ahead"], mk["ICE"]["queue_ahead"])))
 
 orders = store.orders_for_run(run["id"])
-check("4 words x 5 cancel times = 20 paper orders", len(orders) == 20, str(len(orders)))
+check("2 qualifying words x 5 cancel times = 10 paper orders", len(orders) == 10, str(len(orders)))
 by = dict(((o["market_ticker"].split("-")[-1], o["variant_id"]), o) for o in orders)
-check("order size = $5 / 45c = 11.11", all(close(o["contracts"], 11.11) for o in orders))
-check("OIL 5:35 cancels with only the first maker fill", close(by[("OIL", "c1735")]["filled_contracts"], 4.0) and by[("OIL", "c1735")]["status"] == "partial · cancelled", str(by[("OIL", "c1735")]["status"]))
-check("OIL 5:40 gets both maker fills (all 11.11)", close(by[("OIL", "c1740")]["filled_contracts"], 11.11) and by[("OIL", "c1740")]["status"] == "filled")
-check("DRONE instant taker fill at 75c", close(by[("DRONE", "c1735")]["taker_contracts"], 11.11) and close(by[("DRONE", "c1735")]["maker_contracts"], 0) and by[("DRONE", "c1735")]["taker_fee_cents"] == 15)
-check("TRUMP5 rests, maker only, 3 contracts", close(by[("TRUMP5", "c1755")]["maker_contracts"], 3.0) and by[("TRUMP5", "c1755")]["taker_fee_cents"] == 0 and by[("TRUMP5", "c1755")]["status"] == "partial · cancelled")
-check("GOLD: two taker levels, 96c then 95c, fees 2c + 3c", close(by[("GOLD", "c1735")]["taker_fee_cents"], 5) and close(by[("GOLD", "c1735")]["taker_contracts"], 11.11))
+check("order size = $3 / 70c = 4.29, not capped (cap is 50)", all(close(o["contracts"], 4.29) and not o["size_capped"] for o in orders))
+check("OIL 5:35 cancels with only the first maker fill (partial)", close(by[("OIL", "c1735")]["filled_contracts"], 4.0) and by[("OIL", "c1735")]["status"] == "partial · cancelled", str(by[("OIL", "c1735")]["status"]))
+check("OIL 5:40 gets both maker fills (fully filled)", close(by[("OIL", "c1740")]["filled_contracts"], 4.29) and by[("OIL", "c1740")]["status"] == "filled")
+check("ICE gets an instant taker fill at 35c (better than our 30c limit)", close(by[("ICE", "c1735")]["taker_contracts"], 4.0) and by[("ICE", "c1735")]["taker_fee_cents"] == 7, str(by[("ICE", "c1735")]))
+check("ICE's remainder fills as maker at our 30c limit, same in every version", all(close(by[("ICE", v["id"])]["maker_contracts"], 0.29) for v in pipeline.C.VARIANTS))
 check("no fee on maker fills", all(float(o["maker_fee_cents"] or 0) == 0 for o in orders))
 
 fills = store.fills_for_run(run["id"])
-check("fills: OIL 2, DRONE 1, TRUMP5 1, GOLD 2", len(fills) == 6, str(len(fills)))
+check("fills: OIL 2 (both maker), ICE 2 (1 taker + 1 maker)", len(fills) == 4, str(len(fills)))
 trades_n = store.counts()["nolive_trades"]
-check("raw tape stored once per trade: 4 after the fire + 3 in the gap + 1 after the fire on a skipped word", trades_n == 8, str(trades_n))
+check("raw tape stored once per trade: OIL 3 + ICE 2 + NVDA 2 + TRUMP5 2 = 9", trades_n == 9, str(trades_n))
 with store.engine().begin() as conn:
     pre_tr = conn.execute(text("select count(*) from nolive_trades where market_ticker = :m"), {"m": EVENT + "-NVDA"}).scalar()
     pre_rows = conn.execute(text("select count(*), count(distinct market_ticker) from nolive_depth where kind = 'pre'")).one()
     orphan = conn.execute(text("select count(*) from nolive_depth where run_id is null")).scalar()
-check("NVDA (not ordered): its gap trade AND its post-fire trade are both saved", pre_tr == 2, str(pre_tr))
+check("gap trades saved even for a word we did NOT order (NVDA)", pre_tr == 2, str(pre_tr))
+check("gap books: every word (7), about every 30s from 5:28", pre_rows[1] == 7 and 56 <= pre_rows[0] <= 70, str(tuple(pre_rows)))
+check("gap books linked to tonight's run after the fire", orphan == 0, str(orphan))
+check("gap trades never became fills (they happened before our order)", len([f for f in store.fills_for_run(run["id"]) if f["ref"] in ("trade:%s-OIL#0" % EVENT,)]) == 0)
+depth_n = store.counts()["nolive_depth"]
+check("book pictures recorded every minute for ALL 7 words (ordered or not)", depth_n > 60, str(depth_n))
 with store.engine().begin() as conn:
     poll_words = conn.execute(text("select count(distinct market_ticker) from nolive_depth where kind = 'poll'")).scalar()
     nvda_poll = conn.execute(text("select count(*) from nolive_depth where kind = 'poll' and market_ticker = :m"), {"m": EVENT + "-NVDA"}).scalar()
 check("after the fire, books are kept for ALL 7 words (ordered or not)", poll_words == 7, str(poll_words))
 check("a skipped word gets about one book a minute until 5:55", 20 <= nvda_poll <= 26, str(nvda_poll))
-check("gap books: every word (7), about every 30s from 5:28", pre_rows[1] == 7 and 56 <= pre_rows[0] <= 70, str(tuple(pre_rows)))
-check("gap books linked to tonight's run after the fire", orphan == 0, str(orphan))
-check("gap trades never became fills (they happened before our order)", len([f for f in store.fills_for_run(run["id"]) if f["ref"] in ("trade:%s-OIL#0" % EVENT,)]) == 0)
-depth_n = store.counts()["nolive_depth"]
-check("book pictures recorded every minute (4 words x ~24)", depth_n > 60, str(depth_n))
 check("Telegram: fire + close messages", len(notifier.sent) == 2 and "fired" in notifier.sent[0] and "cancelled" in notifier.sent[1], str([x[:30] for x in notifier.sent]))
 
 # ---- settlement at 6:06 PM
@@ -302,25 +305,26 @@ run = store.get_run(DATE)
 check("run settled", run["status"] == "settled", run["status"])
 orders = store.orders_for_run(run["id"])
 by = dict(((o["market_ticker"].split("-")[-1], o["variant_id"]), o) for o in orders)
-check("OIL 5:35: word said, lose 4 x 45c = -180c", close(by[("OIL", "c1735")]["pnl_cents"], -180.0, 0.05), str(by[("OIL", "c1735")]["pnl_cents"]))
-check("OIL 5:40: word said, lose 11.11 x 45c = -499.95c", close(by[("OIL", "c1740")]["pnl_cents"], -499.95, 0.05))
-check("DRONE: not said, +11.11 x 75c - 15c = +818.25c (taker)", close(by[("DRONE", "c1750")]["pnl_cents"], 818.25, 0.05) and close(by[("DRONE", "c1750")]["taker_pnl_cents"], 818.25, 0.05))
-check("TRUMP5: not said, +3 x 55c = +165c (maker)", close(by[("TRUMP5", "c1745")]["pnl_cents"], 165.0, 0.05) and close(by[("TRUMP5", "c1745")]["maker_pnl_cents"], 165.0, 0.05))
-check("GOLD: said, -(4x4 + 7.11x5) - 5c fees = -56.55c", close(by[("GOLD", "c1740")]["pnl_cents"], -56.55, 0.05), str(by[("GOLD", "c1740")]["pnl_cents"]))
+check("OIL 5:35: word said, lose 4.0 x 70c = -280c", close(by[("OIL", "c1735")]["pnl_cents"], -280.0, 0.05), str(by[("OIL", "c1735")]["pnl_cents"]))
+check("OIL 5:40: word said, lose 4.29 x 70c = -300.3c", close(by[("OIL", "c1740")]["pnl_cents"], -300.3, 0.05))
+check("ICE: not said, taker 4.0@35c - 7c fee = +133c", close(by[("ICE", "c1750")]["taker_pnl_cents"], 133.0, 0.05))
+check("ICE: not said, maker 0.29@30c = +8.7c", close(by[("ICE", "c1750")]["maker_pnl_cents"], 8.7, 0.05))
+check("ICE total (any version, all fully filled early) = +141.7c", close(by[("ICE", "c1755")]["pnl_cents"], 141.7, 0.05))
 srcs = dict((x["market_ticker"].split("-")[-1], x["result_source"]) for x in store.markets_for_run(run["id"]) if x["qualified"])
-check("results: no-fade first, Kalshi for the rest", srcs == {"OIL": "nofade", "DRONE": "nofade", "TRUMP5": "kalshi", "GOLD": "kalshi"}, str(srcs))
-check("Kalshi asked only for the 2 words no-fade lacked", fake.calls["market"] == 2, str(fake.calls["market"]))
+check("results: no-fade first (OIL), Kalshi for the rest (ICE)", srcs == {"OIL": "nofade", "ICE": "kalshi"}, str(srcs))
+check("Kalshi asked only for the 1 word no-fade lacked", fake.calls["market"] == 1, str(fake.calls["market"]))
 check("settled Telegram summary sent once", len(notifier.sent) == 3 and "settled" in notifier.sent[2])
 
 rows = analytics.variant_rows(store.all_orders())
 r35 = [r for r in rows if r["variant_id"] == "c1735"][0]
 r40 = [r for r in rows if r["variant_id"] == "c1740"][0]
-check("scoreboard 5:35 net = (-180 + 818.25 + 165 - 56.55)/100 = $7.47", close(r35["net"], 7.4670, 0.01), str(r35["net"]))
-check("scoreboard 5:40 net = (-499.95 + 818.25 + 165 - 56.55)/100 = $4.27", close(r40["net"], 4.2675, 0.01), str(r40["net"]))
-check("taker/maker split on scoreboard", close(r40["taker_pnl"], (818.25 - 56.55) / 100.0, 0.01) and close(r40["maker_pnl"], (-499.95 + 165.0) / 100.0, 0.01))
-check("best by $ = 5:35 (only OIL differs)", analytics.best_of(rows)["by_net"]["variant_id"] == "c1735")
+check("scoreboard 5:35 net = (-280 + 141.7)/100 = -$1.38", close(r35["net"], -1.383, 0.02), str(r35["net"]))
+check("scoreboard 5:40 net = (-300.3 + 141.7)/100 = -$1.59", close(r40["net"], -1.586, 0.02), str(r40["net"]))
+check("taker/maker split on scoreboard", close(r40["taker_pnl"], 1.33, 0.02) and close(r40["maker_pnl"], -2.916, 0.02))
+check("best by $ = 5:35 (OIL's partial fill there loses less)", analytics.best_of(rows)["by_net"]["variant_id"] == "c1735")
 buckets = analytics.bucket_rows(store.all_orders(), "c1740")
-check("bucket table sums to the scoreboard", close(sum(b["net $"] for b in buckets), r40["net"], 0.01))
+check("bucket table sums to the scoreboard", close(sum(b["net $"] for b in buckets), r40["net"], 0.02))
+check("OIL (20c) and ICE (25c) land in different 5c-wide buckets", buckets[4]["words"] == 1 and buckets[5]["words"] == 1, str([b["words"] for b in buckets]))
 
 # ---- ticking again does nothing (idempotent), and a fresh start after the fact settles nothing twice
 before = store.counts()
@@ -329,7 +333,6 @@ runner.last_settle_try = None
 runner.tick()
 check("second settle pass is a no-op", store.counts() == before and len(notifier.sent) == 3)
 
-# ------------------------------------------------------------------ 6) app asleep through the window -> 'missed', never a late fire
 print("6) missed window")
 DATE2 = "2026-09-21"                      # a Monday
 EVENT2 = "KXWORLDNEWSMENTION-26SEP21"

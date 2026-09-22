@@ -53,8 +53,9 @@ def main():
     first_q = None
     for m in markets:
         last, bid, ask = market_prices(m)
-        q = engine.qualify(last, bid, ask, m.get("status"), C.SKIP_YES_AT_OR_ABOVE)
         w = word_from_market(m)
+        counting = count_needed(w) >= 2 and C.EXCLUDE_COUNTING_WORDS
+        q = engine.qualify(last, bid, ask, m.get("status"), C.QUALIFY_MAX_YES_CENTS, counting)
         if q["qualified"] and first_q is None:
             first_q = m
         print("%-34s %-8s %6s %6s %6s  %s%s" % (w[:34], str(m.get("status"))[:8], last, bid, ask,
@@ -72,9 +73,11 @@ def main():
     summ = engine.book_summary(book, C.LIMIT_YES_CENTS)
     print("YES size that would match a SELL YES %dc right now: %s   |   NO size queued ahead of us: %s" % (
         C.LIMIT_YES_CENTS, summ["yes_size_at_limit"], summ["queue_ahead"]))
-    want = engine.contracts_for(C.PAPER_DOLLARS, C.LIMIT_YES_CENTS)
-    fills = engine.taker_fills(book, C.LIMIT_YES_CENTS, want)
-    print("order size $%g -> %.2f contracts; instant taker fills: %s" % (C.PAPER_DOLLARS, want, fills or "none (it would rest)"))
+    sized = engine.order_size(C.PAPER_DOLLARS, C.LIMIT_YES_CENTS, C.MAX_CONTRACTS_PER_WORD)
+    fills = engine.taker_fills(book, C.LIMIT_YES_CENTS, sized["contracts"])
+    print("order size $%g -> %.2f contracts%s; instant taker fills: %s" % (
+        C.PAPER_DOLLARS, sized["contracts"], " (CAPPED, raw would be %.2f)" % sized["raw"] if sized["capped"] else "",
+        fills or "none (it would rest)"))
 
     print("\n--- last trades for %s (oldest first)" % t)
     trades = k.get_trades(t, max_pages=1)[-6:]

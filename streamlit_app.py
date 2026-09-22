@@ -79,9 +79,12 @@ today_run = next((r for r in runs if r["event_date"] == today), None)
 settled_nights = len(set(o["event_date"] for o in orders if o.get("pnl_cents") is not None))
 
 st.title("🕔 WNT Post-Cold-Open · paper bot")
+_sz = C.sized_contracts()
 st.caption(
-    "%s · sells YES at %dc on every word under %gc at %s CT · %d cancel-time versions · "
-    "PAPER ONLY (no key, no orders)" % (C.VERSION, C.LIMIT_YES_CENTS, C.SKIP_YES_AT_OR_ABOVE, C.FIRE_AT_CT, len(C.VARIANTS))
+    "%s (v2) · sells YES at %dc on every word at or below %gc at %s CT, counting words excluded · "
+    "$%g/word -> %.2f contracts%s (cap %g) · %d cancel-time versions · PAPER ONLY (no key, no orders)"
+    % (C.VERSION, C.LIMIT_YES_CENTS, C.QUALIFY_MAX_YES_CENTS, C.FIRE_AT_CT, C.PAPER_DOLLARS, _sz["contracts"],
+       " ⚠️ capped" if _sz["capped"] else "", C.MAX_CONTRACTS_PER_WORD, len(C.VARIANTS))
 )
 
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -121,6 +124,18 @@ with tab_score:
                 "Only %d settled night(s). With this few nights the ranking is mostly luck. Look for a version that stays "
                 "ahead as nights pile up, not one good night." % best["nights"]
             )
+        avg_words = (sum(r["words_ordered"] for r in rows) / len(C.VARIANTS)) / best["nights"] if best["nights"] else 0
+        if avg_words and avg_words < 3:
+            st.info(
+                "Averaging about %.1f qualifying words a night. The 30c cap is a much tighter filter than the old "
+                "rule, so there are fewer trades to learn from per night -- expect it to take more nights, not fewer, "
+                "before the ranking above means much." % avg_words
+            )
+        capped_n = sum(1 for o in orders if o.get("size_capped"))
+        if orders:
+            st.caption("%d of %d orders so far hit the %g-contract cap." % (capped_n, len(orders), C.MAX_CONTRACTS_PER_WORD)
+                       if capped_n else "No orders have hit the %g-contract cap yet (current sizing is $%g -> %.2f contracts)."
+                       % (C.MAX_CONTRACTS_PER_WORD, C.PAPER_DOLLARS, C.sized_contracts()["contracts"]))
         table = []
         for r in rows:
             star = ""
@@ -157,22 +172,28 @@ with tab_score:
                 st.bar_chart(pd.DataFrame({"Net P&L $": [r["net"] for r in rows]}, index=[r["cancel"] for r in rows]))
     with st.expander("How to read this"):
         st.markdown(
-            "- **Order**: SELL YES at %dc on every word whose YES price is under %gc at %s CT (same as BUY NO at %dc). $%g of collateral per word.\n"
+            "- **Order**: SELL YES at %dc on every word whose YES price is at or below %gc at %s CT (same as BUY NO at %dc). Counting words like \"3+ times\" are excluded entirely. $%g of collateral requested per word, capped at %g contracts.\n"
             "- **Taker**: YES buyers were already bidding %dc or more, so the order matched at once at THEIR price and paid Kalshi's taker fee.\n"
             "- **Maker**: the rest rested. It fills only when a YES buyer pays MORE than %dc (a trade above our price). No fee on this series.\n"
             "- **Cancel**: each version is the same order, cancelled at a different time. Later cancel = more chances to fill, and more risk.\n"
             "- **Return %%** = profit / money used (the collateral on what actually filled). **NO won %%** = words that were not said, of the words that filled.\n"
             "- Money uses Kalshi's official yes/no result, so tonight's numbers appear after settlement."
-            % (C.LIMIT_YES_CENTS, C.SKIP_YES_AT_OR_ABOVE, C.FIRE_AT_CT, 100 - C.LIMIT_YES_CENTS, C.PAPER_DOLLARS,
-               C.LIMIT_YES_CENTS, C.LIMIT_YES_CENTS)
+            % (C.LIMIT_YES_CENTS, C.QUALIFY_MAX_YES_CENTS, C.FIRE_AT_CT, 100 - C.LIMIT_YES_CENTS, C.PAPER_DOLLARS,
+               C.MAX_CONTRACTS_PER_WORD, C.LIMIT_YES_CENTS, C.LIMIT_YES_CENTS)
         )
-    with st.expander("What the backtest said (for comparison)"):
+    with st.expander("Why this rule (v2), for comparison"):
         st.markdown(
-            "From 50 past nights of public trades ($5 per word, normal words only, NO limit 45c = YES ask 55c, after fees). "
-            "The 'instant' part is an ESTIMATE; this bot measures it for real.\n\n"
-            "| cancel | resting words | instant words (estimate) | both |\n|---|---|---|---|\n"
-            "| 5:35:30 | +$1.36 / night | +$1.17 | +$2.52 |\n| 5:45:00 | +$2.57 / night | +$1.44 | +$4.01 |\n\n"
-            "The second half of those 50 nights earned about half of the first half, so expect less than these numbers."
+            "Backtested on 40 nights of Kalshi's own public trade history (independent of this bot's data). "
+            "The original rule (1c-97c, flat sell at 55c) only made money on the subset of words that were "
+            "already cheap when it fired -- split out, that subset returned about **+45% ROI**. Everything else "
+            "it traded (words that opened above 30c) lost money at every cancel time tested, consistently, "
+            "across most nights -- not just one bad night. A top-of-scale version (buying YES on words already "
+            "likely to be said) was tested two separate ways and found no edge either way -- a dead end.\n\n"
+            "That's the reasoning behind narrowing to 30c and adding the contract cap: past roughly 50-75 "
+            "contracts, real buying volume floods in on the nights a word is genuinely heading toward getting "
+            "said (so a dollar-only formula would over-fill the losers), while quiet nights only partially fill "
+            "either way -- structurally overweighting the losses. This is the first stretch of live data testing v2 "
+            "directly; the old 1c-97c numbers above no longer apply."
         )
 
 # ------------------------------------------------------------------ tonight

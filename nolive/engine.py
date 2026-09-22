@@ -20,17 +20,33 @@ def contracts_for(dollars: float, limit_yes_cents: float) -> float:
     return round(float(dollars) / per, 2)
 
 
+def order_size(dollars: float, limit_yes_cents: float, max_contracts: float) -> dict:
+    """What contracts_for() would ask for, hard-capped at max_contracts. Sizing by dollars alone breaks
+    past a point: on nights a word is genuinely heading toward getting said, real buying volume floods
+    in and fills you to whatever size you ask for; on quiet nights you only get a partial fill either
+    way. Past the cap you're structurally overweighting the losses and underweighting the wins."""
+    raw = contracts_for(dollars, limit_yes_cents)
+    capped = raw > max_contracts + 1e-9
+    return {"contracts": round(min(raw, max_contracts), 2), "capped": capped, "raw": raw}
+
+
 # ---------------------------------------------------------------- who qualifies
-def qualify(last, bid, ask, status, skip_at: float) -> dict:
-    """The rule: YES price below `skip_at` (1c to 97c). Words at 98c+ are already said.
+def qualify(last, bid, ask, status, max_yes_cents: float, is_counting: bool = False) -> dict:
+    """v2 rule: YES price AT OR BELOW `max_yes_cents` (the only zone the backtest found an edge in).
+    Counting words ("3+ times") are excluded entirely -- they behave differently and were left out of
+    every backtest number behind this rule.
 
     YES price = last trade price. If there has been no trade, fall back to the best YES bid, then the ask.
-    A best YES bid at `skip_at` or more also disqualifies (the book says the word is said).
+    A best YES bid above the cap also disqualifies, even if the last trade looks stale and low -- that
+    guards against acting on an old price after the book has already moved past our line.
     """
     out = {"qualified": False, "reason": "", "price": None, "basis": "none"}
     st = str(status or "").lower()
     if st and st not in ("active", "open"):
         out["reason"] = "market not active (%s)" % st
+        return out
+    if is_counting:
+        out["reason"] = "counting word (excluded)"
         return out
     if last is not None and last > 0:
         out["price"], out["basis"] = last, "last"
@@ -41,11 +57,11 @@ def qualify(last, bid, ask, status, skip_at: float) -> dict:
     if out["price"] is None:
         out["reason"] = "no price"
         return out
-    if out["price"] >= skip_at - EPS:
-        out["reason"] = "YES %gc >= %gc" % (out["price"], skip_at)
+    if out["price"] > max_yes_cents + EPS:
+        out["reason"] = "YES %gc > %gc cap" % (out["price"], max_yes_cents)
         return out
-    if bid is not None and bid >= skip_at - EPS:
-        out["reason"] = "YES bid %gc >= %gc" % (bid, skip_at)
+    if bid is not None and bid > max_yes_cents + EPS:
+        out["reason"] = "YES bid %gc > %gc cap" % (bid, max_yes_cents)
         return out
     out["qualified"] = True
     return out

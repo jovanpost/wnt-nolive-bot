@@ -94,6 +94,9 @@ def _split_statements(sql: str) -> list:
 def _for_sqlite(stmt: str) -> str:
     stmt = stmt.replace("bigserial primary key", "integer primary key autoincrement")
     stmt = stmt.replace("now()", "CURRENT_TIMESTAMP")
+    if stmt.strip().lower().startswith("alter table") and "add column if not exists" in stmt.lower():
+        stmt = stmt.replace("add column if not exists", "add column").replace(
+            "ADD COLUMN IF NOT EXISTS", "ADD COLUMN")
     return stmt
 
 
@@ -164,10 +167,10 @@ def claim_run(row: dict) -> tuple:
     with engine().begin() as conn:
         res = conn.execute(text("""
             insert into nolive_runs (event_date, event_ticker, status, scheduled_at, fired_at, late_seconds,
-                limit_yes_cents, dollars, skip_at_or_above, cancel_times, fee_type, fee_multiplier, maker_rate,
+                limit_yes_cents, dollars, qualify_max_yes_cents, cancel_times, fee_type, fee_multiplier, maker_rate,
                 version, notes)
             values (:event_date, :event_ticker, :status, :scheduled_at, :fired_at, :late_seconds,
-                :limit_yes_cents, :dollars, :skip_at_or_above, :cancel_times, :fee_type, :fee_multiplier,
+                :limit_yes_cents, :dollars, :qualify_max_yes_cents, :cancel_times, :fee_type, :fee_multiplier,
                 :maker_rate, :version, :notes)
             on conflict (event_date) do nothing
         """), params)
@@ -257,9 +260,11 @@ def insert_order(row: dict) -> None:
     with engine().begin() as conn:
         conn.execute(text("""
             insert into nolive_orders (run_id, event_date, event_ticker, market_ticker, word, variant_id, cancel_ct,
-                cancel_at, limit_yes_cents, contracts, dollars, placed_at, yes_price_at_place, is_counting, status)
+                cancel_at, limit_yes_cents, contracts, dollars, placed_at, yes_price_at_place, is_counting,
+                size_capped, status)
             values (:run_id, :event_date, :event_ticker, :market_ticker, :word, :variant_id, :cancel_ct,
-                :cancel_at, :limit_yes_cents, :contracts, :dollars, :placed_at, :yes_price_at_place, :is_counting, :status)
+                :cancel_at, :limit_yes_cents, :contracts, :dollars, :placed_at, :yes_price_at_place, :is_counting,
+                :size_capped, :status)
             on conflict (event_date, market_ticker, variant_id) do nothing
         """), params)
 
