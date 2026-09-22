@@ -53,6 +53,20 @@ def variant_rows(orders: list) -> list:
     return rows
 
 
+
+def word_lines(orders: list, event_date: str, variant_id: str):
+    """Per-word settlement detail for one night and one cancel version, no-fade style.
+    Returns (filled_orders, skipped_count, bullet_lines)."""
+    mine = [o for o in orders if o["event_date"] == event_date and o["variant_id"] == variant_id and o.get("pnl_cents") is not None]
+    filled = [o for o in mine if _f(o["filled_contracts"]) > 0]
+    lines = []
+    for o in sorted(filled, key=lambda x: (x.get("word") or x["market_ticker"])):
+        n = _f(o["filled_contracts"])
+        no_price = (_f(o["risk_cents"]) / n) if n else 0.0     # NO-equivalent price actually paid, in cents
+        lines.append("• %s: %s %.2f@%.1f\u00a2 $%+.2f" % (
+            o.get("word") or o["market_ticker"], (o.get("result") or "?").upper(), n, no_price, _f(o["pnl_cents"]) / 100.0))
+    return filled, len(mine) - len(filled), lines
+
 def best_of(rows: list) -> dict:
     live = [r for r in rows if r["nights"] > 0]
     if not live:
@@ -104,7 +118,8 @@ def bucket_rows(orders: list, variant_id: str, counting: str = "all") -> list:
 
 
 def night_summary_text(event_date: str, orders: list, all_orders: list) -> str:
-    """Telegram text for one settled night, plus running totals."""
+    """Telegram text for one settled night: per-version comparison, plus a no-fade-style per-word
+    breakdown for whichever cancel time came out best tonight (open the dashboard for the other 4)."""
     tonight = [o for o in orders if o["event_date"] == event_date]
     lines = ["🌙 WNT post-cold-open · %s settled" % event_date]
     words = len(set(o["market_ticker"] for o in tonight))
@@ -120,6 +135,21 @@ def night_summary_text(event_date: str, orders: list, all_orders: list) -> str:
             sum(_f(o["taker_contracts"]) for o in done), sum(_f(o["maker_contracts"]) for o in done),
             sum(_f(o["taker_fee_cents"]) + _f(o["maker_fee_cents"]) for o in done) / 100.0,
             "%+.2f" % (sum(_f(o["pnl_cents"]) for o in done) / 100.0)))
+    tonight_rows = variant_rows(tonight)
+    tonight_best = max((r for r in tonight_rows if r["nights"]), key=lambda r: r["net"], default=None)
+    if tonight_best:
+        filled, skipped, bullets = word_lines(tonight, event_date, tonight_best["variant_id"])
+        lines.append("")
+        lines.append("📜 Settlement update — best tonight: %s cancel" % tonight_best["cancel"])
+        lines.append("%s: %s dollars (%s%% on $%.2f filled, %d name(s))" % (
+            event_date, "%+.2f" % tonight_best["net"],
+            ("%+.1f" % tonight_best["roi"]) if tonight_best["roi"] is not None else "n/a",
+            tonight_best["risk"], len(filled)))
+        lines.extend(bullets)
+        if skipped:
+            lines.append("(%d word(s) never filled, no cost)" % skipped)
+        lines.append("(the other 4 cancel times are on the dashboard's Tonight tab)")
+
     rows = variant_rows(all_orders)
     best = best_of(rows)
     if best:
