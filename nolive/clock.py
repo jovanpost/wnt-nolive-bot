@@ -39,6 +39,17 @@ def record_from(date_str: str) -> datetime:
     return at(date_str, C.RECORD_FROM_CT)
 
 
+def live_cancel_at(date_str: str) -> datetime:
+    """The time baked into each live order as its own server-side expiry (Kalshi enforces this)."""
+    return at(date_str, C.LIVE_CANCEL_CT)
+
+
+def live_app_cancel_at(date_str: str) -> datetime:
+    """When the in-app backup cancel_all() fires: a bit AFTER live_cancel_at(), on purpose, so it
+    never races Kalshi's own expiry over the same instant."""
+    return live_cancel_at(date_str) + timedelta(seconds=C.LIVE_APP_CANCEL_BUFFER_SECONDS)
+
+
 def last_cancel_at(date_str: str) -> datetime:
     return max(cancel_at(date_str, v["cancel_ct"]) for v in C.VARIANTS)
 

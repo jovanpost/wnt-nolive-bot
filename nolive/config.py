@@ -47,7 +47,7 @@ def _num(name: str, default: float) -> float:
         return default
 
 
-VERSION = "wnt-nolive-v3.0.0"    # bump this every release; it shows on the dashboard and in Telegram
+VERSION = "wnt-nolive-v3.0.2"    # bump this every release; it shows on the dashboard and in Telegram
 CT = ZoneInfo("America/Chicago")
 
 SERIES = _secret("SERIES", "KXWORLDNEWSMENTION")
@@ -137,6 +137,11 @@ LIVE_SMOKE_CONTRACTS = max(1, int(_num("LIVE_SMOKE_CONTRACTS", 1)))
 
 LIVE_DOLLARS_PER_WORD = _num("LIVE_DOLLARS_PER_WORD", 5.0)   # <-- change the $ amount here, in Secrets
 LIVE_CANCEL_CT = _secret("LIVE_CANCEL_CT", "17:55")          # single cancel time for live (no variants)
+                                                              # -- baked into each order as server-side expiry
+LIVE_APP_CANCEL_BUFFER_SECONDS = int(_num("LIVE_APP_CANCEL_BUFFER_SECONDS", 60))
+# the in-app backup cancel_all() fires this many seconds AFTER LIVE_CANCEL_CT, on purpose -- so it
+# never races Kalshi's own server-side expiry over the same instant. Kalshi's expiry is the one
+# that actually matters; the in-app cancel is only a second, belt-and-suspenders check.
 LIVE_MAX_MARKETS_PER_DAY = int(_num("LIVE_MAX_MARKETS_PER_DAY", 25))
 LIVE_MAX_DAILY_COLLATERAL = _num("LIVE_MAX_DAILY_COLLATERAL", 150.00)
 LIVE_POLL_SECONDS = int(_num("LIVE_POLL_SECONDS", 60))

@@ -296,6 +296,12 @@ check("LIVE_DRY_RUN defaults to True in config.py (no env/secret set)",
 check("LIVE_SMOKE defaults to False in config.py",
       "LIVE_SMOKE = _flag(\"LIVE_SMOKE\", False)" in open(os.path.join(ROOT, "nolive", "config.py")).read())
 
+print("10) the in-app backup cancel fires AFTER Kalshi's own server-side expiry, never at/before it")
+d = "2026-10-05"
+gap = (clock.live_app_cancel_at(d) - clock.live_cancel_at(d)).total_seconds()
+check("live_app_cancel_at is strictly after live_cancel_at", gap > 0, gap)
+check("the gap matches LIVE_APP_CANCEL_BUFFER_SECONDS", gap == C.LIVE_APP_CANCEL_BUFFER_SECONDS, gap)
+
 print()
 print("%d checks, %d failed" % (CHECKS[0], len(FAILS)))
 if FAILS:

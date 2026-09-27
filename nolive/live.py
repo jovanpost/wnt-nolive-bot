@@ -12,8 +12,15 @@ Safety rules this file follows (same ones wnt-nofade-bot follows for its own liv
   - Every real order defaults to post_only (must rest, never take), except when the book is
     ALREADY past our price -- then take_if_cheap fires once, deliberately, instead of resting
     into a fill we'd have taken anyway.
-  - Kalshi itself is told to expire the order at cancel time (server_expiry), as a backup to our
-    own cancel_all() call.
+  - The REAL safety net is server-side expiry: every order tells Kalshi itself, at the moment it
+    is placed, to expire at LIVE_CANCEL_CT -- enforced by Kalshi's own matching engine, so it works
+    even if this app is down. The in-app cancel_all() (run_forever()'s own tick loop, while the
+    Streamlit app is up) is a second, belt-and-suspenders layer on top of that -- not the other way
+    around -- and it deliberately fires LIVE_APP_CANCEL_BUFFER_SECONDS (default 60s) AFTER
+    LIVE_CANCEL_CT, so it never races Kalshi's own expiry over the same instant. There is
+    deliberately no GitHub Actions cancel workflow: it isn't reliable enough to depend on (same
+    conclusion reached for wnt-nofade-bot), so it was left out rather than shipped as a false sense
+    of security.
   - A hard per-day cap on markets and on total resting collateral, checked BEFORE any order goes out.
   - Three modes, same meaning as wnt-nofade-bot: dry_run (default, no API calls that place money),
     smoke (also sends one tiny real order per word, for testing), live (the real thing).
@@ -135,7 +142,7 @@ class LiveRunner:
             store.update_live_run(event_date, markets_seen=seen, notes="insufficient balance")
             return
 
-        expiry = clock.cancel_at(event_date, C.LIVE_CANCEL_CT).astimezone(timezone.utc)
+        expiry = clock.live_cancel_at(event_date).astimezone(timezone.utc)
         expiry_epoch = int(expiry.timestamp()) if C.LIVE_USE_SERVER_SIDE_EXPIRY else None
 
         placed = rejected = taken = 0
@@ -449,7 +456,11 @@ class LiveRunner:
             STATE.update(active_event=None, active_date=None, orders_today=0,
                          fills_today=0, cancelled_today=False)
 
-        deadline = clock.cancel_at(today, C.LIVE_CANCEL_CT)
+        # Kalshi's own server-side expiry (baked into each order) fires at LIVE_CANCEL_CT itself.
+        # This in-app backup deliberately fires a bit LATER (live_app_cancel_at), so it never races
+        # Kalshi's own engine over the same instant -- it's a check that the real thing worked, not
+        # a second copy of it.
+        app_deadline = clock.live_app_cancel_at(today)
 
         if not STATE["active_event"]:
             run = store.get_live_run(today)
@@ -459,12 +470,14 @@ class LiveRunner:
                 store.log_activity("live_resume", "recovered %s after a restart" % today)
 
         if STATE["active_event"]:
-            if now >= deadline:
+            if now >= app_deadline:
                 if STATE.get("cancelled_today"):
                     STATE.update(active_event=None, active_date=None)
                     time.sleep(C.LIVE_COLD_POLL_SECONDS)
                     return
-                self.cancel_all(STATE["active_date"], reason="scheduled %s cancel" % C.LIVE_CANCEL_CT)
+                self.cancel_all(STATE["active_date"],
+                                reason="in-app backup cancel (+%ds after %s CT server-expiry)"
+                                       % (C.LIVE_APP_CANCEL_BUFFER_SECONDS, C.LIVE_CANCEL_CT))
                 STATE.update(active_event=None, active_date=None)
                 time.sleep(C.LIVE_COLD_POLL_SECONDS)
                 return
@@ -475,7 +488,7 @@ class LiveRunner:
         found = self.find_todays_event()
         if found:
             event_ticker, event_date = found
-            if now >= clock.cancel_at(event_date, C.LIVE_CANCEL_CT):
+            if now >= clock.live_cancel_at(event_date):
                 store.claim_live_run({"event_date": event_date, "event_ticker": event_ticker,
                                       "status": "skipped", "mode": self.mode(),
                                       "detected_at": datetime.now(timezone.utc),
