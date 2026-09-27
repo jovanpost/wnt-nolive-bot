@@ -1,19 +1,28 @@
-"""Kalshi PUBLIC read-only client. No key, no signing, no order calls.
+"""Kalshi clients.
+
+KalshiPublic: read-only, no key, no signing, no order calls. Everything the paper bot uses.
+KalshiClient: signed requests + order placement, used ONLY by nolive/live.py (real money). Ported
+from wnt-nofade-bot's wnt/kalshi.py -- same signing scheme, same order body, same idempotent
+client_order_id contract, so a client_order_id Kalshi has already seen is refused as a duplicate.
 
 Prices come back in DOLLARS ("0.5500") on the current API and in whole cents on the old one.
 Everything here is converted to CENTS as floats (55.0), so half-cent prices are not rounded away.
 """
 from __future__ import annotations
 
+import base64
 import logging
 import random
 import re
 import threading
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 from . import config as C
 
@@ -223,3 +232,229 @@ class KalshiPublic:
             })
         out.sort(key=lambda x: x["ts"])
         return out
+
+
+# ==================================================================
+# SIGNED client (LIVE money). Only nolive/live.py imports this.
+# Reuses the same KalshiError class defined above (both clients raise it).
+# ==================================================================
+def _to_cents(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        d = Decimal(str(value))
+    except Exception:
+        return None
+    if d != d.to_integral_value() or (0 < d < 1):
+        return int((d * 100).to_integral_value())
+    return int(d)
+
+
+def _to_count(value: Any) -> float:
+    if value is None or value == "":
+        return 0.0
+    try:
+        return float(Decimal(str(value)))
+    except Exception:
+        return 0.0
+
+
+class KalshiClient:
+    """Signed requests. Reads KALSHI_KEY_ID / KALSHI_PRIVATE_KEY_PEM (or _PATH) from config."""
+
+    def __init__(self, key_id: str | None = None, private_key_pem: str | None = None,
+                 private_key_path: str | None = None, base_url: str | None = None):
+        self.key_id = key_id if key_id is not None else C.KALSHI_KEY_ID
+        self.base_url = (base_url or C.LIVE_BASE_URL).rstrip("/")
+        self._key = self._load_key(
+            private_key_pem if private_key_pem is not None else C.KALSHI_PRIVATE_KEY_PEM,
+            private_key_path if private_key_path is not None else C.KALSHI_PRIVATE_KEY_PATH,
+        )
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": C.LIVE_USER_AGENT})
+
+    @staticmethod
+    def _load_key(pem_text: str, pem_path: str):
+        raw = None
+        if pem_text and "BEGIN" in pem_text:
+            raw = pem_text.replace("\\n", "\n").strip().encode()
+        elif pem_path:
+            try:
+                with open(pem_path, "rb") as fh:
+                    raw = fh.read()
+            except OSError as exc:
+                log.warning("could not read private key at %s: %s", pem_path, exc)
+        if raw is None:
+            return None
+        try:
+            return serialization.load_pem_private_key(raw, password=None)
+        except Exception as exc:
+            log.error("private key failed to parse: %s", exc)
+            return None
+
+    @property
+    def authenticated(self) -> bool:
+        return self._key is not None and bool(self.key_id)
+
+    def _headers(self, method: str, sign_path: str) -> dict:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if not self.authenticated:
+            return headers
+        ts = str(int(time.time() * 1000))
+        message = (ts + method.upper() + sign_path.split("?")[0]).encode()
+        signature = self._key.sign(
+            message,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+            hashes.SHA256(),
+        )
+        headers.update({
+            "KALSHI-ACCESS-KEY": self.key_id,
+            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+            "KALSHI-ACCESS-TIMESTAMP": ts,
+        })
+        return headers
+
+    def request(self, method: str, endpoint: str, params: dict | None = None, body: dict | None = None,
+                auth: bool = True, retries: int = 4, timeout: int = 20) -> dict:
+        sign_path = C.LIVE_API_ROOT + endpoint
+        url = self.base_url + sign_path
+        last: Exception | None = None
+        for attempt in range(retries + 1):
+            headers = self._headers(method, sign_path) if auth else {
+                "Content-Type": "application/json", "User-Agent": C.LIVE_USER_AGENT}
+            try:
+                resp = self.session.request(method, url, params=params, json=body,
+                                            headers=headers, timeout=timeout)
+            except requests.RequestException as exc:
+                last = exc
+                if attempt >= retries:
+                    raise
+                time.sleep(min(2 ** attempt, 8) + random.random())
+                continue
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last = KalshiError(resp.status_code, resp.text, endpoint)
+                if attempt >= retries:
+                    raise last
+                time.sleep(min(0.25 * (2 ** attempt), 5) + random.random() * 0.25)
+                continue
+            if resp.status_code >= 400:
+                raise KalshiError(resp.status_code, resp.text, endpoint)
+            if not resp.text:
+                return {}
+            try:
+                return resp.json()
+            except ValueError:
+                return {"raw": resp.text}
+        raise last or RuntimeError("unreachable")
+
+    def paginate(self, endpoint: str, key: str, params: dict | None = None,
+                 auth: bool = True, max_pages: int = 20) -> list:
+        out: list = []
+        cursor = None
+        for _ in range(max_pages):
+            page_params = dict(params or {})
+            if cursor:
+                page_params["cursor"] = cursor
+            data = self.request("GET", endpoint, params=page_params, auth=auth)
+            out.extend(data.get(key) or [])
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+        return out
+
+    def get_balance(self) -> dict:
+        return self.request("GET", "/portfolio/balance")
+
+    def get_resting_orders(self, series_prefix: str | None = None) -> list:
+        orders = self.paginate("/portfolio/orders", "orders", {"status": "resting", "limit": 200})
+        if series_prefix:
+            orders = [o for o in orders if str(o.get("ticker", "")).startswith(series_prefix)]
+        return orders
+
+    def get_fills(self, ticker: str | None = None, limit: int = 200) -> list:
+        params: dict = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        return self.paginate("/portfolio/fills", "fills", params)
+
+    def create_no_order(self, ticker: str, no_price_cents: int, count: float, client_order_id: str,
+                        post_only: bool = True, expiration_epoch: int | None = None) -> dict:
+        """SELL YES at (100 - no_price_cents) = BUY NO at no_price_cents. Same body wnt-nofade-bot sends."""
+        yes_price = 100 - int(no_price_cents)
+        body = {
+            "ticker": ticker,
+            "client_order_id": client_order_id,
+            "side": "ask",
+            "count": "%.2f" % float(count),
+            "price": "%.4f" % (yes_price / 100),
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
+            "post_only": bool(post_only),
+            "cancel_order_on_pause": True,
+            "reduce_only": False,
+        }
+        if expiration_epoch:
+            body["expiration_time"] = int(expiration_epoch)
+        resp = self.request("POST", "/portfolio/events/orders", body=body)
+        return {
+            "order_id": resp.get("order_id"),
+            "client_order_id": resp.get("client_order_id") or client_order_id,
+            "fill_count": _to_count(resp.get("fill_count")),
+            "remaining_count": _to_count(resp.get("remaining_count")),
+            "avg_fill_price_cents": _to_cents(resp.get("average_fill_price")),
+            "fee_cents": _to_cents(resp.get("average_fee_paid")),
+            "raw": resp,
+        }
+
+    def cancel_order(self, order_id: str) -> bool:
+        for endpoint in ("/portfolio/events/orders/%s" % order_id, "/portfolio/orders/%s" % order_id):
+            try:
+                self.request("DELETE", endpoint, retries=3)
+                return True
+            except KalshiError as exc:
+                if exc.status == 404:
+                    return True
+                log.warning("cancel via %s failed: %s", endpoint, exc)
+        return False
+
+    def batch_cancel(self, order_ids: list) -> tuple:
+        if not order_ids:
+            return 0, []
+        try:
+            resp = self.request("DELETE", "/portfolio/events/orders/batched",
+                                body={"orders": [{"order_id": oid} for oid in order_ids]}, retries=3)
+            failed = []
+            ok = 0
+            for entry in resp.get("orders", []):
+                if entry.get("error"):
+                    failed.append(entry.get("order_id"))
+                else:
+                    ok += 1
+            if ok or not failed:
+                return ok, [f for f in failed if f]
+        except KalshiError as exc:
+            log.warning("batch cancel failed (%s), falling back to singles", exc)
+        ok, failed = 0, []
+        for oid in order_ids:
+            if self.cancel_order(oid):
+                ok += 1
+            else:
+                failed.append(oid)
+            time.sleep(0.05)
+        return ok, failed
+
+
+def live_book_metrics(book: dict, our_no_cents: int) -> dict:
+    """Same shape as engine.book_summary, plus the fields live.py's take-if-cheap check wants."""
+    yes = book.get("yes") or []
+    no = book.get("no") or []
+    yes_trigger = 100 - our_no_cents
+    return {
+        "best_yes_bid": yes[-1][0] if yes else None,
+        "best_no_bid": no[-1][0] if no else None,
+        "yes_size_total": sum(c for _, c in yes),
+        "no_size_total": sum(c for _, c in no),
+        "no_size_ahead": sum(c for p, c in no if p > our_no_cents),
+        "no_size_at_our_price": sum(c for p, c in no if p == our_no_cents),
+        "yes_size_that_would_fill_us": sum(c for p, c in yes if p >= yes_trigger),
+    }

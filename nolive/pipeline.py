@@ -389,7 +389,7 @@ class Runner:
         store.log_activity("fire", "%s: %d words, %d qualified, %d instant" % (today, len(rows), len(qualified), instant_words))
         skipped = [r for r in rows if not r["q"]["qualified"]]
         self.notify.send(
-            "🔔 WNT post-cold-open %s\n fired %s CT (%.1fs after %s)\n%d words | %d qualify (YES at or below %gc, counting words excluded) | %d skipped\n"
+            "🔔 WNT post-cold-open %s\n fired %s (%.1fs after %s CT)\n%d words | %d qualify (YES at or below %gc, counting words excluded) | %d skipped\n"
             "SELL YES %dc on each, $%g per word (%.2f contracts%s)\ninstant (taker) fills: %d words, %.1f contracts\nresting on the rest until %s"
             % (today, clock.fmt(fired_at), (run.get("late_seconds") or 0), C.FIRE_AT_CT, len(rows), len(qualified),
                C.QUALIFY_MAX_YES_CENTS, len(skipped), C.LIMIT_YES_CENTS, C.PAPER_DOLLARS, intended,

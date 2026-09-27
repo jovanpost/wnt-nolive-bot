@@ -22,7 +22,8 @@ log = logging.getLogger("nolive.store")
 _engine: Engine | None = None
 _lock = threading.Lock()
 
-SCHEMA_FILE = Path(__file__).resolve().parent.parent / "sql" / "001_nolive_schema.sql"
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "sql"
+SCHEMA_FILE = SCHEMA_DIR / "001_nolive_schema.sql"   # kept for anything that imports this name directly
 
 _TS_KEYS = ("_at", "ts")
 
@@ -101,15 +102,16 @@ def _for_sqlite(stmt: str) -> str:
 
 
 def init_db() -> None:
-    statements = _split_statements(SCHEMA_FILE.read_text(encoding="utf-8"))
-    for stmt in statements:
-        if not using_postgres():
-            stmt = _for_sqlite(stmt)
-        try:
-            with engine().begin() as conn:
-                conn.execute(text(stmt))
-        except Exception as exc:
-            log.warning("init_db statement skipped: %s | %s", exc, stmt[:80])
+    for path in sorted(SCHEMA_DIR.glob("*.sql")):
+        statements = _split_statements(path.read_text(encoding="utf-8"))
+        for stmt in statements:
+            if not using_postgres():
+                stmt = _for_sqlite(stmt)
+            try:
+                with engine().begin() as conn:
+                    conn.execute(text(stmt))
+            except Exception as exc:
+                log.warning("init_db statement skipped (%s): %s | %s", path.name, exc, stmt[:80])
     log.info("nolive tables ready (%s)", "postgres" if using_postgres() else "sqlite")
 
 
@@ -379,4 +381,131 @@ def depth_for_market(event_date: str, market_ticker: str, limit: int = 60) -> li
             select ts, kind, best_yes_bid, best_no_bid, yes_size_total, no_size_total, yes_size_at_limit
             from nolive_depth where event_date = :d and market_ticker = :m order by ts limit :n
         """), {"d": event_date, "m": market_ticker, "n": limit}).mappings().all()
+    return [_row(r) for r in rows]
+
+
+# ==================================================================
+# LIVE (real money). Separate tables (nolive_live_*), separate from everything above.
+# ==================================================================
+def live_day_handled(event_date: str) -> bool:
+    with engine().connect() as conn:
+        row = conn.execute(text("select status from nolive_live_runs where event_date = :d"),
+                           {"d": event_date}).mappings().first()
+    return bool(row) and row["status"] not in ("no_event",)
+
+
+def get_live_run(event_date: str) -> dict | None:
+    with engine().connect() as conn:
+        row = conn.execute(text("select * from nolive_live_runs where event_date = :d"),
+                           {"d": event_date}).mappings().first()
+    return _row(row) if row else None
+
+
+def claim_live_run(row: dict) -> tuple:
+    """Insert tonight's live run row. Returns (run, created). created=False means we already handled today."""
+    params = dict(row)
+    params["detected_at"] = _ts(params.get("detected_at"))
+    with engine().begin() as conn:
+        res = conn.execute(text("""
+            insert into nolive_live_runs (event_date, event_ticker, status, mode, detected_at, notes)
+            values (:event_date, :event_ticker, :status, :mode, :detected_at, :notes)
+            on conflict (event_date) do nothing
+        """), params)
+        created = (res.rowcount or 0) > 0
+    return get_live_run(row["event_date"]), created
+
+
+def update_live_run(event_date: str, **fields: Any) -> None:
+    if not fields:
+        return
+    sets, params = [], {"d": event_date}
+    for i, (k, v) in enumerate(fields.items()):
+        if k.endswith("_at"):
+            v = _ts(v)
+        sets.append("%s = :p%d" % (k, i))
+        params["p%d" % i] = v
+    with engine().begin() as conn:
+        conn.execute(text("update nolive_live_runs set %s where event_date = :d" % ", ".join(sets)), params)
+
+
+def recent_live_runs(limit: int = 60) -> list:
+    with engine().connect() as conn:
+        rows = conn.execute(text("select * from nolive_live_runs order by event_date desc limit :n"),
+                            {"n": limit}).mappings().all()
+    return [_row(r) for r in rows]
+
+
+def live_order_exists(client_order_id: str) -> bool:
+    with engine().connect() as conn:
+        row = conn.execute(text("select id from nolive_live_orders where client_order_id = :c"),
+                           {"c": client_order_id}).first()
+    return row is not None
+
+
+def record_live_order(**fields: Any) -> None:
+    params = dict(fields)
+    for k in ("placed_at", "first_fill_at", "cancelled_at"):
+        if k in params:
+            params[k] = _ts(params.get(k))
+    cols = list(params.keys())
+    with engine().begin() as conn:
+        conn.execute(text("""
+            insert into nolive_live_orders (%s) values (%s)
+            on conflict (client_order_id) do nothing
+        """ % (", ".join(cols), ", ".join(":" + c for c in cols))), params)
+
+
+def update_live_order(client_order_id: str, **fields: Any) -> None:
+    if not fields:
+        return
+    sets, params = [], {"c": client_order_id}
+    for i, (k, v) in enumerate(fields.items()):
+        if k.endswith("_at"):
+            v = _ts(v)
+        sets.append("%s = :p%d" % (k, i))
+        params["p%d" % i] = v
+    with engine().begin() as conn:
+        conn.execute(text("update nolive_live_orders set %s where client_order_id = :c" % ", ".join(sets)), params)
+
+
+def live_orders_for_day(event_date: str) -> list:
+    with engine().connect() as conn:
+        rows = conn.execute(text("select * from nolive_live_orders where event_date = :d order by id"),
+                            {"d": event_date}).mappings().all()
+    return [_row(r) for r in rows]
+
+
+def all_live_orders() -> list:
+    with engine().connect() as conn:
+        rows = conn.execute(text("select * from nolive_live_orders order by event_date, id")).mappings().all()
+    return [_row(r) for r in rows]
+
+
+def mark_all_live_resting_cancelled(event_date: str) -> int:
+    with engine().begin() as conn:
+        result = conn.execute(text("""
+            update nolive_live_orders set status = 'cancelled', cancelled_at = :t
+            where event_date = :d and status = 'resting'
+        """), {"t": _ts(clock.now_utc()), "d": event_date})
+    return result.rowcount or 0
+
+
+def record_live_fill(fill_id: str, **fields: Any) -> bool:
+    params = dict(fields)
+    params["created_at"] = _ts(params.get("created_at"))
+    with engine().begin() as conn:
+        res = conn.execute(text("""
+            insert into nolive_live_fills (fill_id, order_id, event_date, market_ticker, contracts, price_cents,
+                is_taker, fee_cents, created_at, raw)
+            values (:fill_id, :order_id, :event_date, :market_ticker, :contracts, :price_cents,
+                :is_taker, :fee_cents, :created_at, :raw)
+            on conflict (fill_id) do nothing
+        """), {"fill_id": fill_id, **params})
+        return (res.rowcount or 0) > 0
+
+
+def recent_live_fills(limit: int = 100) -> list:
+    with engine().connect() as conn:
+        rows = conn.execute(text("select * from nolive_live_fills order by id desc limit :n"),
+                            {"n": limit}).mappings().all()
     return [_row(r) for r in rows]

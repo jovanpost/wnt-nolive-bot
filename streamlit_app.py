@@ -1,6 +1,8 @@
-"""WNT post-cold-open PAPER bot: the scoreboard for every cancel-time version.
+"""WNT post-cold-open bot: the scoreboard for every cancel-time version, plus the live-engine status.
 
-Paper only. No Kalshi key, no order buttons. P&L shows only after Kalshi publishes the official result.
+No order buttons here. The live engine (real money) runs its own background thread, controlled only
+by Streamlit Secrets and Telegram (/live_status /live_pause /live_resume /live_cancel_now). P&L shows
+only after Kalshi publishes the official result.
 """
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
-from nolive import analytics, clock, config as C, notify, pipeline, store
+from nolive import analytics, clock, config as C, live, notify, pipeline, store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s")
 
@@ -22,9 +24,12 @@ st.set_page_config(page_title="WNT Post-Cold-Open (paper)", page_icon="🕔", la
 def boot():
     store.init_db()
     pipeline.register_commands()
+    live.register_commands()
     notify.start_listener()
     threading.Thread(target=pipeline.run_forever, name="nolive-loop", daemon=True).start()
-    return {"started_at": clock.now_ct().isoformat()}
+    if live.enabled():
+        threading.Thread(target=live.run_forever, name="nolive-live-loop", daemon=True).start()
+    return {"started_at": clock.now_ct().isoformat(), "live_enabled": live.enabled()}
 
 
 if st.query_params.get("ping") == "true":     # the keep-alive workflow hits this
@@ -181,19 +186,10 @@ with tab_score:
             % (C.LIMIT_YES_CENTS, C.QUALIFY_MAX_YES_CENTS, C.FIRE_AT_CT, 100 - C.LIMIT_YES_CENTS, C.PAPER_DOLLARS,
                C.MAX_CONTRACTS_PER_WORD, C.LIMIT_YES_CENTS, C.LIMIT_YES_CENTS)
         )
-    with st.expander("Why this rule (v2), for comparison"):
+    with st.expander("About this rule"):
         st.markdown(
-            "Backtested on 40 nights of Kalshi's own public trade history (independent of this bot's data). "
-            "The original rule (1c-97c, flat sell at 55c) only made money on the subset of words that were "
-            "already cheap when it fired -- split out, that subset returned about **+45% ROI**. Everything else "
-            "it traded (words that opened above 30c) lost money at every cancel time tested, consistently, "
-            "across most nights -- not just one bad night. A top-of-scale version (buying YES on words already "
-            "likely to be said) was tested two separate ways and found no edge either way -- a dead end.\n\n"
-            "That's the reasoning behind narrowing to 30c and adding the contract cap: past roughly 50-75 "
-            "contracts, real buying volume floods in on the nights a word is genuinely heading toward getting "
-            "said (so a dollar-only formula would over-fill the losers), while quiet nights only partially fill "
-            "either way -- structurally overweighting the losses. This is the first stretch of live data testing v2 "
-            "directly; the old 1c-97c numbers above no longer apply."
+            "This is version 2 of the rule; see the code (`nolive/engine.py`, `nolive/config.py`) "
+            "for exactly how it qualifies a word and sizes an order."
         )
 
 # ------------------------------------------------------------------ tonight

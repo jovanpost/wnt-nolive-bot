@@ -1,7 +1,8 @@
-"""Env / Streamlit secrets. Every knob of the post-cold-open paper bot lives here.
+"""Env / Streamlit secrets. Every knob of the post-cold-open bot lives here.
 
-PAPER ONLY. This repo has no Kalshi key, no signing code and no place-order call.
-It can only READ public Kalshi data and write nolive_* tables.
+The paper engine (5 cancel-time variants, PAPER_DOLLARS) is unchanged and always runs -- it never
+sends a real order. The LIVE section below is a separate, optional real-money engine (nolive_live_*
+tables, its own single cancel time) that is OFF (LIVE_DRY_RUN=true) until you turn it on yourself.
 """
 from __future__ import annotations
 
@@ -46,7 +47,7 @@ def _num(name: str, default: float) -> float:
         return default
 
 
-VERSION = "wnt-nolive-v2.0.0"    # bump this every release; it shows on the dashboard and in Telegram
+VERSION = "wnt-nolive-v3.0.0"    # bump this every release; it shows on the dashboard and in Telegram
 CT = ZoneInfo("America/Chicago")
 
 SERIES = _secret("SERIES", "KXWORLDNEWSMENTION")
@@ -117,6 +118,93 @@ def order_no_price_cents() -> int:
 def sized_contracts() -> dict:
     from . import engine
     return engine.order_size(PAPER_DOLLARS, LIMIT_YES_CENTS, MAX_CONTRACTS_PER_WORD)
+
+
+# =====================================================================
+# LIVE (real money). Uses the exact same rule as the paper bot above (QUALIFY_MAX_YES_CENTS,
+# LIMIT_YES_CENTS, EXCLUDE_COUNTING_WORDS, MAX_CONTRACTS_PER_WORD) -- only the dollar size, the
+# cancel time, and whether it is real orders differ. Off (dry_run) by default: nothing real
+# happens until LIVE_DRY_RUN is set to false in Streamlit Secrets, on purpose, by you.
+#
+# Rollout, same as wnt-nofade-bot: LIVE_DRY_RUN=true first (simulated, safe) -> LIVE_SMOKE=true for
+# one night (adds ONE real 1-contract order per word, tiny money, to prove the order code works) ->
+# LIVE_DRY_RUN=false for the real thing.
+# =====================================================================
+LIVE_DRY_RUN = _flag("LIVE_DRY_RUN", True)              # true = no real orders sent, ever (default)
+LIVE_USE_DEMO = _flag("LIVE_USE_DEMO", False)           # true = Kalshi's fake-money demo server
+LIVE_SMOKE = _flag("LIVE_SMOKE", False)                 # true = ALSO send one tiny REAL order per word
+LIVE_SMOKE_CONTRACTS = max(1, int(_num("LIVE_SMOKE_CONTRACTS", 1)))
+
+LIVE_DOLLARS_PER_WORD = _num("LIVE_DOLLARS_PER_WORD", 5.0)   # <-- change the $ amount here, in Secrets
+LIVE_CANCEL_CT = _secret("LIVE_CANCEL_CT", "17:55")          # single cancel time for live (no variants)
+LIVE_MAX_MARKETS_PER_DAY = int(_num("LIVE_MAX_MARKETS_PER_DAY", 25))
+LIVE_MAX_DAILY_COLLATERAL = _num("LIVE_MAX_DAILY_COLLATERAL", 150.00)
+LIVE_POLL_SECONDS = int(_num("LIVE_POLL_SECONDS", 60))
+LIVE_DETECT_POLL_SECONDS = int(_num("LIVE_DETECT_POLL_SECONDS", 20))
+LIVE_COLD_POLL_SECONDS = int(_num("LIVE_COLD_POLL_SECONDS", 300))
+
+LIVE_POST_ONLY = _flag("LIVE_POST_ONLY", True)                    # order must rest, never take -- except:
+LIVE_TAKE_IF_ALREADY_CHEAP = _flag("LIVE_TAKE_IF_ALREADY_CHEAP", True)  # ...if the book is already past our price
+LIVE_USE_SERVER_SIDE_EXPIRY = _flag("LIVE_USE_SERVER_SIDE_EXPIRY", True)  # Kalshi itself expires the order too
+LIVE_ORDER_API = _secret("LIVE_ORDER_API", "v2")
+
+LIVE_PROD_BASE = "https://external-api.kalshi.com"
+LIVE_DEMO_BASE = "https://external-api.demo.kalshi.co"
+LIVE_API_ROOT = "/trade-api/v2"
+LIVE_BASE_URL = LIVE_DEMO_BASE if LIVE_USE_DEMO else LIVE_PROD_BASE
+
+KALSHI_KEY_ID = _secret("KALSHI_KEY_ID", "")
+KALSHI_PRIVATE_KEY_PEM = _secret("KALSHI_PRIVATE_KEY_PEM", "")
+KALSHI_PRIVATE_KEY_PATH = _secret("KALSHI_PRIVATE_KEY_PATH", "")
+LIVE_USER_AGENT = "wnt-nolive-bot-live/" + VERSION
+
+
+def live_no_price_cents() -> int:
+    """Same 30/70 split as the paper rule: sell YES at LIMIT_YES_CENTS = buy NO at 100 - LIMIT_YES_CENTS."""
+    return 100 - LIMIT_YES_CENTS
+
+
+def live_sized_contracts() -> dict:
+    from . import engine
+    return engine.order_size(LIVE_DOLLARS_PER_WORD, LIMIT_YES_CENTS, MAX_CONTRACTS_PER_WORD)
+
+
+def live_collateral_per_market() -> float:
+    sized = live_sized_contracts()
+    return sized["contracts"] * live_no_price_cents() / 100.0
+
+
+def live_effective_max_markets() -> int:
+    per = live_collateral_per_market()
+    by_money = int(LIVE_MAX_DAILY_COLLATERAL // per) if per > 0 else LIVE_MAX_MARKETS_PER_DAY
+    return max(0, min(LIVE_MAX_MARKETS_PER_DAY, by_money))
+
+
+def live_mode() -> str:
+    if LIVE_DRY_RUN:
+        return "dry_run"
+    return "demo" if LIVE_USE_DEMO else "live"
+
+
+def live_summary() -> str:
+    where = "DEMO (fake money)" if LIVE_USE_DEMO else "PRODUCTION"
+    mode = "DRY RUN (no real orders)" if LIVE_DRY_RUN else ("LIVE $%g/word" % LIVE_DOLLARS_PER_WORD)
+    if LIVE_SMOKE:
+        mode += " + SMOKE %d" % LIVE_SMOKE_CONTRACTS
+    sized = live_sized_contracts()
+    money_cap = live_effective_max_markets()
+    markets_txt = "max %d markets" % LIVE_MAX_MARKETS_PER_DAY
+    if money_cap < LIVE_MAX_MARKETS_PER_DAY:
+        markets_txt += " (money cap allows only %d)" % money_cap
+    return (
+        "%s | %s | %s\n"
+        "same rule as paper: YES at or below %gc (counting words excluded), sell YES %dc (= buy NO %dc) x %.2f contracts%s\n"
+        "$%.2f/market, %s, max $%.2f resting\n"
+        "cancel %s CT | post_only=%s | take_if_cheap=%s | server_expiry=%s | order_api=%s"
+    ) % (VERSION, mode, where, QUALIFY_MAX_YES_CENTS, LIMIT_YES_CENTS, live_no_price_cents(),
+         sized["contracts"], " (CAPPED)" if sized["capped"] else "",
+         live_collateral_per_market(), markets_txt, LIVE_MAX_DAILY_COLLATERAL, LIVE_CANCEL_CT,
+         LIVE_POST_ONLY, LIVE_TAKE_IF_ALREADY_CHEAP, LIVE_USE_SERVER_SIDE_EXPIRY, LIVE_ORDER_API)
 
 
 def summary() -> str:
