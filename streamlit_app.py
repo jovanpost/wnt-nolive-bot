@@ -105,8 +105,8 @@ c3.metric("Tonight", today_run["status"] if today_run else "not fired yet")
 c4.metric("Next fire", next_fire_label(today))
 c5.metric("Settled nights", settled_nights)
 
-tab_score, tab_tonight, tab_nights, tab_price, tab_data, tab_log = st.tabs(
-    ["Scoreboard", "Tonight", "Nights", "By price", "Fills & data", "Log"]
+tab_score, tab_tonight, tab_nights, tab_price, tab_data, tab_live, tab_log = st.tabs(
+    ["Scoreboard", "Tonight", "Nights", "By price", "Fills & data", "Live", "Log"]
 )
 
 # ------------------------------------------------------------------ scoreboard
@@ -290,6 +290,68 @@ with tab_data:
                 st.dataframe(pd.DataFrame(dp), hide_index=True, width="stretch")
 
 # ------------------------------------------------------------------ log
+with tab_live:
+    key_ok = live.enabled()
+    lc1, lc2, lc3 = st.columns(3)
+    lc1.metric("Kalshi key detected", "yes" if key_ok else "NO -- live engine is OFF")
+    if not key_ok:
+        st.error(
+            "No live engine is running. This means KALSHI_KEY_ID and KALSHI_PRIVATE_KEY_PEM "
+            "(or KALSHI_PRIVATE_KEY_PATH) are not BOTH set and non-empty in Streamlit Secrets right "
+            "now, or the app hasn't restarted since they were added. Check the exact secret names, "
+            "then use \"Reboot app\" from the Streamlit Cloud menu (⋮) if you just added them."
+        )
+    else:
+        mode = C.live_mode()
+        mode_label = {"dry_run": "DRY RUN -- simulating only, no real orders",
+                      "demo": "DEMO -- Kalshi's fake-money server",
+                      "live": "LIVE -- REAL MONEY"}[mode]
+        lc2.metric("Mode", mode_label)
+        lc3.metric("Live engine thread", "running" if live.STATE.get("running") else "not started yet")
+        if mode == "dry_run":
+            st.warning(
+                "LIVE_DRY_RUN is true (the default). No real orders will be sent until you set "
+                "LIVE_DRY_RUN = false in Streamlit Secrets. This is the safe, expected state until "
+                "you're ready."
+            )
+        elif mode == "live":
+            st.success("Real orders ARE enabled.")
+        st.code(C.live_summary())
+        st.write(
+            "active_event=%s · orders_today=%s · fills_today=%s · last_poll=%s · last_error=%s"
+            % (live.STATE.get("active_event"), live.STATE.get("orders_today"),
+               live.STATE.get("fills_today"), clock.fmt(live.STATE.get("last_poll")) if live.STATE.get("last_poll") else "-",
+               live.STATE.get("last_error") or "-")
+        )
+        paused_live = False
+        try:
+            paused_live = bool(store.get_state("live_paused", False))
+        except Exception:
+            pass
+        if paused_live:
+            st.error("LIVE is PAUSED (via /live_pause). Send /live_resume in Telegram to resume.")
+
+    st.subheader("Tonight's live orders")
+    live_rows_tonight = store.live_orders_for_day(today)
+    if live_rows_tonight:
+        st.dataframe(pd.DataFrame(live_rows_tonight), hide_index=True, width="stretch")
+    else:
+        st.write("No live order rows for today yet.")
+
+    st.subheader("Recent live runs (one row per night)")
+    live_runs = store.recent_live_runs(20)
+    if live_runs:
+        st.dataframe(pd.DataFrame(live_runs), hide_index=True, width="stretch")
+    else:
+        st.write("No live runs recorded yet.")
+
+    st.subheader("Recent real fills")
+    live_fills = store.recent_live_fills(50)
+    if live_fills:
+        st.dataframe(pd.DataFrame(live_fills), hide_index=True, width="stretch")
+    else:
+        st.write("No real fills recorded yet.")
+
 with tab_log:
     st.code(C.summary())
     st.write("ticks this session: %s · last status: %s" % (pipeline.STATE["ticks"], pipeline.STATE["last_status"] or "-"))
