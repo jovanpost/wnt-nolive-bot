@@ -2,8 +2,13 @@
 """Read-only pre-flight for the LIVE engine. Places nothing, cancels nothing.
 
 Run this BEFORE ever setting LIVE_DRY_RUN=false, to confirm the Kalshi key works and to see
-tonight's would-be orders, with no risk. Reads the key from your .env / Streamlit Secrets --
-never asks you to type or paste it here.
+tonight's would-be orders, with no risk.
+
+If you're running this on Streamlit Cloud (or anywhere your Secrets are already loaded), it
+just reads them -- no prompts. Running it on your own machine, with no local secrets file, it
+will ask you to paste the Kalshi key and (optionally) the database URL, with hidden input.
+Nothing you paste is ever echoed back or written to disk -- it only lives in this one process,
+for this one run.
 
     python3 scripts/verify_live_api.py
 """
@@ -14,6 +19,15 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+
+from _secrets import need_database_url, need_kalshi_credentials  # noqa: E402
+
+if not (os.environ.get("KALSHI_KEY_ID") and os.environ.get("KALSHI_PRIVATE_KEY_PEM")):
+    print("No Kalshi key found in the environment yet -- this looks like a local run.")
+    need_kalshi_credentials()
+    need_database_url()
+    print("Got it. (loaded, not shown)")
+    print()
 
 from nolive import clock, config as C, engine, live, store  # noqa: E402
 from nolive.kalshi import KalshiClient, KalshiPublic, count_needed, market_prices, word_from_market  # noqa: E402
