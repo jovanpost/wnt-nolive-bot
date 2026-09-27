@@ -200,6 +200,15 @@ class LiveRunner:
         coid = client_order_id(event_date, ticker)
         if store.live_order_exists(coid):
             return "exists", "%s (already placed)" % title
+        for existing in store.live_orders_for_day(event_date):
+            if existing.get("market_ticker") != ticker:
+                continue
+            if existing.get("status") in ("rejected",):
+                continue
+            if _is_smoke_row(existing):
+                continue
+            log.info("live row already exists for %s (%s), skipping", ticker, existing.get("status"))
+            return "exists", "%s (already placed)" % title
 
         sized = C.live_sized_contracts()
         no_price = C.live_no_price_cents()

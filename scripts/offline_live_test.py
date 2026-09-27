@@ -302,6 +302,31 @@ gap = (clock.live_app_cancel_at(d) - clock.live_cancel_at(d)).total_seconds()
 check("live_app_cancel_at is strictly after live_cancel_at", gap > 0, gap)
 check("the gap matches LIVE_APP_CANCEL_BUFFER_SECONDS", gap == C.LIVE_APP_CANCEL_BUFFER_SECONDS, gap)
 
+print("11) ticker-based guard: a differently-ID'd row for the same ticker still blocks a new order")
+C.LIVE_DRY_RUN = False
+DATE6 = "2026-10-10"
+EVENT6 = EVENT.replace("26SEP26", "10OCT26")
+market6 = m("OIL", "Oil / Gas", 20)
+market6["ticker"] = EVENT6 + "-OIL"
+signed6 = FakeSignedClient()
+pub6 = FakePublic()
+runner7 = live.LiveRunner(client=signed6, public=pub6)
+# Simulate an order row already on file for this exact ticker, but under a DIFFERENT client_order_id
+# than the one client_order_id(DATE6, ticker) would compute right now -- e.g. as if the ID scheme or
+# a config value changed mid-day. The fast ID-based check alone would miss this.
+store.record_live_order(
+    client_order_id="some-other-coid-for-the-same-ticker", event_date=DATE6, event_ticker=EVENT6,
+    market_ticker=market6["ticker"], word="Oil / Gas", no_price_cents=80, yes_price_cents=20,
+    contracts=5, dollars=5.0, collateral=4.0, placed_at=datetime.now(timezone.utc),
+    mode="live", dry_run=False, post_only=True, took_at_open=False,
+    expiration_epoch=None, status="resting",
+)
+outcome, label = runner7._place_one(market6, "Oil / Gas", EVENT6, DATE6, None)
+check("a same-ticker row under a different client_order_id is treated as already placed",
+      outcome == "exists", (outcome, label))
+check("no real order was sent to Kalshi for the already-covered ticker",
+      len(signed6.orders_sent) == 0, signed6.orders_sent)
+
 print()
 print("%d checks, %d failed" % (CHECKS[0], len(FAILS)))
 if FAILS:
