@@ -59,10 +59,11 @@ def client_order_id(event_date: str, ticker: str) -> str:
 
 
 def smoke_client_order_id(event_date: str, ticker: str) -> str:
-    import hashlib
-    digest = hashlib.md5(ticker.encode()).hexdigest()[:12]
-    return ("nolive-smoke-%s-%s-%d-%d" % (event_date, digest, C.live_no_price_cents(),
-                                          C.LIVE_SMOKE_CONTRACTS))[:64]
+    """v3.0.6: a UUID too. Kalshi's v2 order endpoint wants a UUID client_order_id (no-fade hit this
+    on Sep 9 and switched to uuid5). Smoke rows are still recognised by mode='smoke'."""
+    seed = "nolive-smoke|%s|%s|%d|%d|v2" % (event_date, ticker, C.live_no_price_cents(),
+                                             C.LIVE_SMOKE_CONTRACTS)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
 
 def _is_smoke_row(row: dict) -> bool:
@@ -330,10 +331,15 @@ class LiveRunner:
             log.warning("live fill poll failed: %s", exc)
             return
 
-        known = {o["market_ticker"]: o for o in store.live_orders_for_day(event_date)}
+        # v3.0.6: match each fill to OUR order by Kalshi order_id, not by ticker. The same Kalshi
+        # account also runs no-fade (buy NO 26c on every word) and gap Book L, so a ticker match
+        # would count their fills on the same word as ours.
+        rows_today = store.live_orders_for_day(event_date)
+        known = {str(o["order_id"]): o for o in rows_today if o.get("order_id")}
         for fill in recent:
             ticker = fill.get("ticker") or fill.get("market_ticker")
-            if ticker not in known:
+            oid = fill.get("order_id")
+            if not oid or str(oid) not in known:
                 continue
             from .kalshi import _to_cents, _to_count
             count = _to_count(fill.get("count_fp") or fill.get("count"))
@@ -358,7 +364,7 @@ class LiveRunner:
             )
             if not is_new:
                 continue
-            order = known[ticker]
+            order = known[str(oid)]
             already = float(order.get("filled_contracts") or 0)
             total = already + count
             prev_px = float(order.get("avg_fill_price_cents") or price)
@@ -370,7 +376,9 @@ class LiveRunner:
                 first_fill_at=order.get("first_fill_at") or clock.now_utc(),
                 avg_fill_price_cents=avg_px, fees_cents=(order.get("fees_cents") or 0) + fee,
             )
-            known[ticker]["filled_contracts"] = total
+            order["filled_contracts"] = total
+            order["avg_fill_price_cents"] = avg_px
+            order["fees_cents"] = (order.get("fees_cents") or 0) + fee
             STATE["fills_today"] += 1
             tag = "🔥 [LIVE smoke] " if _is_smoke_row(order) else "✅ [LIVE] "
             taker_flag = " ⚠️ TAKER FILL" if fill.get("is_taker") else ""
@@ -494,14 +502,26 @@ class LiveRunner:
             time.sleep(min(C.LIVE_POLL_SECONDS, max(5, clock.loop_interval(now))))
             return
 
+        # v3.0.6: the live orders go in at FIRE_AT_CT (5:32:30 PM), the SAME moment the paper
+        # engine fires -- never earlier. Before this, place_all ran the moment today's event was
+        # found (late morning), which is a different strategy than the paper rule, and no-fade's
+        # 5:29 series-wide cancel would then have wiped those orders.
+        fire = clock.fire_at(today)
+        if now < fire:
+            time.sleep(max(0.2, min(C.LIVE_DETECT_POLL_SECONDS, (fire - now).total_seconds())))
+            return
+
         found = self.find_todays_event()
         if found:
             event_ticker, event_date = found
-            if now >= clock.live_cancel_at(event_date):
+            late_s = (now - clock.fire_at(event_date)).total_seconds()
+            if now >= clock.live_cancel_at(event_date) or late_s > C.FIRE_GRACE_S:
                 store.claim_live_run({"event_date": event_date, "event_ticker": event_ticker,
                                       "status": "skipped", "mode": self.mode(),
                                       "detected_at": datetime.now(timezone.utc),
-                                      "notes": "appeared after cancel time"})
+                                      "notes": "missed fire window (%.0fs late)" % late_s})
+                notify.send("⏭ [LIVE] %s: app was %.0fs late for the %s CT fire. No live orders tonight."
+                            % (event_date, late_s, C.FIRE_AT_CT))
                 time.sleep(C.LIVE_COLD_POLL_SECONDS)
                 return
             self.place_all(event_ticker, event_date)
