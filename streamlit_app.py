@@ -83,13 +83,13 @@ today = clock.today_ct()
 today_run = next((r for r in runs if r["event_date"] == today), None)
 settled_nights = len(set(o["event_date"] for o in orders if o.get("pnl_cents") is not None))
 
-st.title("🕔 WNT Post-Cold-Open · paper bot")
+st.title("🕔 WNT Post-Cold-Open")
 _sz = C.sized_contracts()
 st.caption(
-    "%s (v2) · sells YES at %dc on every word at or below %gc at %s CT, counting words excluded · "
-    "$%g/word -> %.2f contracts%s (cap %g) · %d cancel-time versions · PAPER ONLY (no key, no orders)"
-    % (C.VERSION, C.LIMIT_YES_CENTS, C.QUALIFY_MAX_YES_CENTS, C.FIRE_AT_CT, C.PAPER_DOLLARS, _sz["contracts"],
-       " ⚠️ capped" if _sz["capped"] else "", C.MAX_CONTRACTS_PER_WORD, len(C.VARIANTS))
+    "%s · paper: $%g/word -> %.2f contracts%s, %d cancel-time versions · live: %s"
+    % (C.VERSION, C.PAPER_DOLLARS, _sz["contracts"], " ⚠️ capped" if _sz["capped"] else "", len(C.VARIANTS),
+       ("REAL MONEY $%g/word" % C.LIVE_DOLLARS_PER_WORD) if (live.enabled() and C.live_mode() == "live")
+       else C.live_mode() if live.enabled() else "off (no key)")
 )
 
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -337,6 +337,26 @@ with tab_live:
         st.dataframe(pd.DataFrame(live_rows_tonight), hide_index=True, width="stretch")
     else:
         st.write("No live order rows for today yet.")
+
+    st.subheader("Live P&L (settled, real money)")
+    _settled = store.live_orders_settled()
+    if _settled:
+        _net = sum(float(o.get("realized_pnl_cents") or 0) for o in _settled) / 100.0
+        _wins = sum(1 for o in _settled if o.get("result") == "no")
+        _cost = sum(float(o.get("filled_contracts") or 0) * float(o.get("avg_fill_price_cents") or 0) for o in _settled) / 100.0
+        l1, l2, l3, l4 = st.columns(4)
+        l1.metric("Settled filled orders", len(_settled))
+        l2.metric("Won (NO)", "%d / %d" % (_wins, len(_settled)))
+        l3.metric("Net $ after fees", "%+.2f" % _net)
+        l4.metric("Return on filled $", ("%+.1f%%" % (100.0 * _net / _cost)) if _cost else "n/a")
+        by_night: dict = {}
+        for o in _settled:
+            by_night.setdefault(o["event_date"], 0.0)
+            by_night[o["event_date"]] += float(o.get("realized_pnl_cents") or 0) / 100.0
+        st.dataframe(pd.DataFrame([{"night": k, "net $": round(v, 2)} for k, v in sorted(by_night.items(), reverse=True)]),
+                     hide_index=True, width="stretch")
+    else:
+        st.write("No settled live fills yet (results come after the show; checked every few minutes).")
 
     st.subheader("Recent live runs (one row per night)")
     live_runs = store.recent_live_runs(20)

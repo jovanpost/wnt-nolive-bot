@@ -71,3 +71,48 @@ def settle_run(run: dict, client=None, now=None) -> dict:
         store.update_run(run["id"], status="settled", settled_at=now)
         store.log_activity("settled", "%s settled: %d orders" % (run["event_date"], len(orders)))
     return {"settled_orders": n_settled, "pending_words": pending, "done": done}
+
+
+def live_pnl_cents(result: str, filled: float, avg_no_cents: float, fees_cents: float) -> float:
+    """Money on a real bought-NO position once Kalshi publishes the result.
+    'no'  -> each contract pays $1: gain (100 - price) per contract, minus fees.
+    'yes' -> each contract pays $0: lose the price paid per contract, plus fees.
+    'void'-> Kalshi returns the money: 0."""
+    if result == "void":
+        return 0.0
+    if result == "no":
+        return filled * (100.0 - avg_no_cents) - fees_cents
+    return -filled * avg_no_cents - fees_cents
+
+
+def settle_live(client=None, now=None) -> int:
+    """v3.0.7: give every real filled nolive order its official result and dollar P&L.
+    Result source: no-fade's settled row first, then Kalshi itself (same order as paper)."""
+    client = client or KalshiPublic()
+    rows = store.live_orders_to_settle()
+    if not rows:
+        return 0
+    done = 0
+    by_date: dict = {}
+    for r in rows:
+        by_date.setdefault(r["event_date"], []).append(r)
+    for date, orders in by_date.items():
+        nf = nofade.results_for(date)
+        for o in orders:
+            res = nf.get(o["market_ticker"])
+            if res not in ("yes", "no"):
+                try:
+                    res = market_result(client.get_market(o["market_ticker"]))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("live result lookup %s failed: %s", o["market_ticker"], exc)
+                    res = None
+            if res not in ("yes", "no", "void"):
+                continue
+            filled = float(o.get("filled_contracts") or 0)
+            px = float(o.get("avg_fill_price_cents") or o.get("no_price_cents") or 0)
+            pnl = live_pnl_cents(res, filled, px, float(o.get("fees_cents") or 0))
+            store.update_live_order(o["client_order_id"], result=res, realized_pnl_cents=round(pnl, 4))
+            done += 1
+    if done:
+        store.log_activity("live_settled", "%d live order(s) settled" % done)
+    return done

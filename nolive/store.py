@@ -481,6 +481,29 @@ def all_live_orders() -> list:
     return [_row(r) for r in rows]
 
 
+def live_orders_to_settle() -> list:
+    """Real (live or smoke) orders with a fill and no official result yet."""
+    with engine().connect() as conn:
+        rows = conn.execute(text("""
+            select * from nolive_live_orders
+            where dry_run = false and mode in ('live', 'smoke')
+              and filled_contracts > 0 and result is null
+            order by id
+        """)).mappings().all()
+    return [_row(r) for r in rows]
+
+
+def live_orders_settled() -> list:
+    """Real LIVE-mode orders (not smoke) that have an official result."""
+    with engine().connect() as conn:
+        rows = conn.execute(text("""
+            select * from nolive_live_orders
+            where dry_run = false and mode = 'live' and filled_contracts > 0 and result is not null
+            order by event_date desc, id
+        """)).mappings().all()
+    return [_row(r) for r in rows]
+
+
 def mark_all_live_resting_cancelled(event_date: str) -> int:
     with engine().begin() as conn:
         result = conn.execute(text("""

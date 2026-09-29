@@ -566,6 +566,12 @@ class Runner:
         if self.last_settle_try is not None and (now - self.last_settle_try).total_seconds() < C.SETTLE_RETRY_S:
             return ""
         self.last_settle_try = now             # one look per interval, even when nothing is due
+        try:
+            n_live = settle.settle_live(self.client)
+            if n_live:
+                log.info("settled %d live nolive order(s)", n_live)
+        except Exception:  # noqa: BLE001  never let live settling break paper settling
+            log.exception("settle_live")
         runs = store.unsettled_runs()
         due = [r for r in runs
                if now >= clock.settle_start(r["event_date"])
