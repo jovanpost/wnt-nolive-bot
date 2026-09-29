@@ -13,11 +13,12 @@ from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
+import mdkit
 from nolive import analytics, clock, config as C, live, notify, pipeline, store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s")
 
-st.set_page_config(page_title="WNT Post-Cold-Open (paper)", page_icon="🕔", layout="wide")
+st.set_page_config(page_title="WNT Post-Cold-Open", page_icon="🕔", layout="wide")
 
 
 @st.cache_resource
@@ -105,12 +106,131 @@ c3.metric("Tonight", today_run["status"] if today_run else "not fired yet")
 c4.metric("Next fire", next_fire_label(today))
 c5.metric("Settled nights", settled_nights)
 
-tab_score, tab_tonight, tab_nights, tab_price, tab_data, tab_live, tab_log = st.tabs(
-    ["Scoreboard", "Tonight", "Nights", "By price", "Fills & data", "Live", "Log"]
+tab_ledger, tab_score, tab_tonight, tab_nights, tab_price, tab_data, tab_live, tab_log = st.tabs(
+    ["Ledger (day / week)", "Scoreboard", "Tonight", "Nights", "By price", "Fills & data", "Live", "Log"]
 )
+_NOW_TXT = clock.fmt(clock.now_utc())
+
+
+def _page(title):
+    mdkit.page(title, C.VERSION, _NOW_TXT)
+
+
+# ------------------------------------------------------------------ ledger
+def _names() -> dict:
+    """market_ticker -> the word as Kalshi shows it."""
+    out = {}
+    for o in orders:
+        if o.get("word"):
+            out[o["market_ticker"]] = o["word"]
+    try:
+        for o in store.all_live_orders():
+            if o.get("word"):
+                out[o["market_ticker"]] = o["word"]
+    except Exception:
+        pass
+    return out
+
+
+NAMES = _names()
+
+
+def _nm(ticker):
+    return NAMES.get(ticker) or ticker
+
+
+def _said(result):
+    return {"yes": "SAID (YES)", "no": "not said (NO)", "void": "void"}.get(result or "", "waiting for result")
+
+
+with tab_ledger:
+    _page("Ledger")
+    live_all = [o for o in store.all_live_orders() if not o.get("dry_run")]
+    fills_all = store.all_live_fills()
+    dates = [o["event_date"] for o in live_all] + [o["event_date"] for o in orders]
+    per = mdkit.period_picker(dates, "ledger", today)
+    st.caption("Showing: %s. All times are Central." % per["label"])
+
+    st.subheader("Live (real money)")
+    lv = [o for o in live_all if per["match"](o["event_date"]) and o.get("mode") in ("live", "smoke")]
+    fills_by_order = {}
+    for f in fills_all:
+        fills_by_order.setdefault(str(f.get("order_id")), []).append(f)
+    if not lv:
+        st.info("No real nolive orders in this period.")
+    else:
+        rows_l = []
+        for o in sorted(lv, key=lambda x: (x["event_date"], str(x.get("placed_at")))):
+            fl = fills_by_order.get(str(o.get("order_id")), [])
+            filled = float(o.get("filled_contracts") or 0)
+            avg = o.get("avg_fill_price_cents")
+            cost = filled * float(avg or 0) / 100.0
+            fees = float(o.get("fees_cents") or 0) / 100.0
+            n_t = sum(1 for f in fl if f.get("is_taker"))
+            rows_l.append({
+                "date": o["event_date"], "word": o.get("word") or o["market_ticker"],
+                "mode": o.get("mode"),
+                "placed": mdkit.ct_time(o.get("placed_at"), C.CT),
+                "order": "buy NO at %d¢ or less x %.2f" % (o["no_price_cents"], float(o["contracts"] or 0)),
+                "filled": round(filled, 2),
+                "first fill": mdkit.ct_time(o.get("first_fill_at"), C.CT),
+                "fills": ("%d (%d taker, %d maker)" % (len(fl), n_t, len(fl) - n_t)) if fl else "0",
+                "avg NO price ¢": None if avg is None else round(float(avg), 2),
+                "cost $": round(cost, 2), "fees $": round(fees, 2),
+                "ended": o.get("status"),
+                "result": _said(o.get("result")) if filled > 0 else "not filled",
+                "paid out $": (round(filled, 2) if o.get("result") == "no" else 0.0) if o.get("result") else None,
+                "P&L $": mdkit.money(o.get("realized_pnl_cents")),
+                "return %": (round(100.0 * float(o["realized_pnl_cents"]) / 100.0 / cost, 1)
+                             if o.get("realized_pnl_cents") is not None and cost > 0 else None),
+            })
+        done = [r for r in rows_l if r["P&L $"] is not None]
+        spent = sum(r["cost $"] for r in rows_l)
+        net = sum(float(o["realized_pnl_cents"]) for o in lv if o.get("realized_pnl_cents") is not None) / 100.0
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Orders", len(rows_l))
+        m2.metric("Filled", sum(1 for r in rows_l if r["filled"] > 0))
+        m3.metric("Won / settled", "%d / %d" % (sum(1 for r in done if r["result"].startswith("not said")), len(done)))
+        m4.metric("Money in fills", "$%.2f" % spent)
+        m5.metric("Net P&L (after fees)", "%+.2f" % net)
+        st.dataframe(pd.DataFrame(rows_l), hide_index=True, width="stretch")
+        fl_rows = []
+        for o in lv:
+            for f in fills_by_order.get(str(o.get("order_id")), []):
+                fl_rows.append({
+                    "time": mdkit.ct_time(f.get("created_at"), C.CT), "date": f["event_date"],
+                    "word": o.get("word") or f["market_ticker"], "contracts": round(float(f["contracts"]), 2),
+                    "NO price ¢": f["price_cents"], "type": "taker (instant)" if f.get("is_taker") else "maker (rested)",
+                    "fee $": round(float(f.get("fee_cents") or 0) / 100.0, 2),
+                    "cost $": round(float(f["contracts"]) * float(f["price_cents"]) / 100.0, 2),
+                })
+        st.subheader("Every real fill")
+        st.dataframe(pd.DataFrame(sorted(fl_rows, key=lambda r: r["time"])), hide_index=True, width="stretch")
+
+    st.subheader("Paper (all cancel versions)")
+    pp = [o for o in orders if per["match"](o["event_date"])]
+    if not pp:
+        st.info("No paper orders in this period.")
+    else:
+        rows_p = []
+        for o in sorted(pp, key=lambda x: (x["event_date"], x.get("word") or "", x["cancel_ct"])):
+            rows_p.append({
+                "date": o["event_date"], "word": o.get("word") or o["market_ticker"],
+                "cancel at": o["cancel_ct"], "placed": mdkit.ct_time(o.get("placed_at"), C.CT),
+                "YES price at fire ¢": o.get("yes_price_at_place"),
+                "wanted": round(float(o["contracts"] or 0), 2),
+                "taker ct": round(float(o.get("taker_contracts") or 0), 2),
+                "maker ct": round(float(o.get("maker_contracts") or 0), 2),
+                "fees $": round((float(o.get("taker_fee_cents") or 0) + float(o.get("maker_fee_cents") or 0)) / 100.0, 2),
+                "money used $": mdkit.money(o.get("risk_cents")),
+                "result": _said(o.get("result")) if float(o.get("filled_contracts") or 0) > 0 else "not filled",
+                "P&L $": mdkit.money(o.get("pnl_cents")),
+            })
+        st.dataframe(pd.DataFrame(rows_p), hide_index=True, width="stretch")
 
 # ------------------------------------------------------------------ scoreboard
 with tab_score:
+    _page("Scoreboard")
     rows = analytics.variant_rows(orders)
     best = analytics.best_of(rows)
     if not best:
@@ -177,23 +297,16 @@ with tab_score:
                 st.bar_chart(pd.DataFrame({"Net P&L $": [r["net"] for r in rows]}, index=[r["cancel"] for r in rows]))
     with st.expander("How to read this"):
         st.markdown(
-            "- **Order**: SELL YES at %dc on every word whose YES price is at or below %gc at %s CT (same as BUY NO at %dc). Counting words like \"3+ times\" are excluded entirely. $%g of collateral requested per word, capped at %g contracts.\n"
-            "- **Taker**: YES buyers were already bidding %dc or more, so the order matched at once at THEIR price and paid Kalshi's taker fee.\n"
-            "- **Maker**: the rest rested. It fills only when a YES buyer pays MORE than %dc (a trade above our price). No fee on this series.\n"
-            "- **Cancel**: each version is the same order, cancelled at a different time. Later cancel = more chances to fill, and more risk.\n"
-            "- **Return %%** = profit / money used (the collateral on what actually filled). **NO won %%** = words that were not said, of the words that filled.\n"
-            "- Money uses Kalshi's official yes/no result, so tonight's numbers appear after settlement."
-            % (C.LIMIT_YES_CENTS, C.QUALIFY_MAX_YES_CENTS, C.FIRE_AT_CT, 100 - C.LIMIT_YES_CENTS, C.PAPER_DOLLARS,
-               C.MAX_CONTRACTS_PER_WORD, C.LIMIT_YES_CENTS, C.LIMIT_YES_CENTS)
-        )
-    with st.expander("About this rule"):
-        st.markdown(
-            "This is version 2 of the rule; see the code (`nolive/engine.py`, `nolive/config.py`) "
-            "for exactly how it qualifies a word and sizes an order."
+            "- **Taker**: matched at once when the order went in, at the other side's price; pays Kalshi's taker fee.\n"
+            "- **Maker**: rested and filled later.\n"
+            "- **Cancel**: each version is the same order, cancelled at a different time.\n"
+            "- **Return %** = profit / money used on what actually filled. **NO won %** = words not said, of the words that filled.\n"
+            "- Money uses Kalshi's official yes/no result, so a night's numbers appear after settlement."
         )
 
 # ------------------------------------------------------------------ tonight
 with tab_tonight:
+    _page("Tonight")
     if not today_run:
         st.write("Not fired yet tonight. The orders go in at **%s CT**." % C.FIRE_AT_CT)
     else:
@@ -238,6 +351,7 @@ with tab_tonight:
 
 # ------------------------------------------------------------------ nights
 with tab_nights:
+    _page("Nights")
     if not runs:
         st.write("No nights yet.")
     else:
@@ -256,6 +370,7 @@ with tab_nights:
 
 # ------------------------------------------------------------------ by price
 with tab_price:
+    _page("By price")
     st.write("Where the money comes from, by the word's YES price when we fired. Settled nights only.")
     pick = st.selectbox("Cancel version", [v["label"] for v in C.VARIANTS], index=len(C.VARIANTS) - 1)
     which = st.radio("Words", ["all", "normal", "counting"], horizontal=True,
@@ -272,6 +387,7 @@ with tab_price:
 
 # ------------------------------------------------------------------ fills & data
 with tab_data:
+    _page("Fills and data")
     cnt = store.counts()
     st.write("Rows saved: **%d** trades · **%d** book pictures · **%d** fills · **%d** orders" % (
         cnt["nolive_trades"], cnt["nolive_depth"], cnt["nolive_fills"], cnt["nolive_orders"]))
@@ -280,10 +396,14 @@ with tab_data:
     fl = store.recent_fills(100)
     if fl:
         fdf = pd.DataFrame(fl)[["ts", "event_date", "market_ticker", "kind", "contracts", "price_cents", "fee_cents", "source"]]
+        fdf.insert(2, "word", fdf["market_ticker"].map(_nm))
+        fdf["ts"] = fdf["ts"].map(lambda v: mdkit.ct_time(v, C.CT))
+        fdf = fdf.drop(columns=["market_ticker"])
         st.subheader("Latest simulated fills")
         st.dataframe(fdf, hide_index=True, width="stretch")
     if today_run:
-        tick = st.selectbox("Book history for a word (tonight)", [m["market_ticker"] for m in store.markets_for_run(today_run["id"]) if m["qualified"]] or [""])
+        tick = st.selectbox("Book history for a word (tonight)", [m["market_ticker"] for m in store.markets_for_run(today_run["id"]) if m["qualified"]] or [""],
+                            format_func=lambda t: _nm(t) if t else "")
         if tick:
             dp = store.depth_for_market(today, tick, 80)
             if dp:
@@ -291,6 +411,7 @@ with tab_data:
 
 # ------------------------------------------------------------------ log
 with tab_live:
+    _page("Live")
     key_ok = live.enabled()
     lc1, lc2, lc3 = st.columns(3)
     lc1.metric("Kalshi key detected", "yes" if key_ok else "NO -- live engine is OFF")
@@ -334,7 +455,15 @@ with tab_live:
     st.subheader("Tonight's live orders")
     live_rows_tonight = store.live_orders_for_day(today)
     if live_rows_tonight:
-        st.dataframe(pd.DataFrame(live_rows_tonight), hide_index=True, width="stretch")
+        st.dataframe(pd.DataFrame([{
+            "word": o.get("word") or o["market_ticker"], "mode": o.get("mode"), "status": o.get("status"),
+            "placed": mdkit.ct_time(o.get("placed_at"), C.CT), "NO limit ¢": o["no_price_cents"],
+            "wanted": round(float(o["contracts"] or 0), 2), "filled": round(float(o.get("filled_contracts") or 0), 2),
+            "avg NO ¢": None if o.get("avg_fill_price_cents") is None else round(float(o["avg_fill_price_cents"]), 2),
+            "fees $": round(float(o.get("fees_cents") or 0) / 100.0, 2),
+            "result": o.get("result") or "", "P&L $": mdkit.money(o.get("realized_pnl_cents")),
+            "reject": o.get("reject_reason") or "",
+        } for o in live_rows_tonight]), hide_index=True, width="stretch")
     else:
         st.write("No live order rows for today yet.")
 
@@ -368,11 +497,16 @@ with tab_live:
     st.subheader("Recent real fills")
     live_fills = store.recent_live_fills(50)
     if live_fills:
-        st.dataframe(pd.DataFrame(live_fills), hide_index=True, width="stretch")
+        st.dataframe(pd.DataFrame([{
+            "time": mdkit.ct_time(f.get("created_at"), C.CT), "word": _nm(f["market_ticker"]),
+            "contracts": round(float(f["contracts"]), 2), "NO price ¢": f["price_cents"],
+            "type": "taker" if f.get("is_taker") else "maker", "fee $": round(float(f.get("fee_cents") or 0) / 100.0, 2),
+        } for f in live_fills]), hide_index=True, width="stretch")
     else:
         st.write("No real fills recorded yet.")
 
 with tab_log:
+    _page("Log")
     st.code(C.summary())
     st.write("ticks this session: %s · last status: %s" % (pipeline.STATE["ticks"], pipeline.STATE["last_status"] or "-"))
     if pipeline.STATE["last_error"]:
@@ -383,3 +517,5 @@ with tab_log:
     if st.button("Refresh now"):
         st.cache_data.clear()
         st.rerun()
+
+mdkit.done()

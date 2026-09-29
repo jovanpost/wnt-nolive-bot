@@ -256,12 +256,10 @@ class LiveRunner:
             return "rejected", "%s (rejected)" % title
 
         row["order_id"] = resp.get("order_id")
+        # v3.0.8: do NOT record the instant fill from Kalshi's order reply. The same fill also
+        # comes back from /portfolio/fills (with the NO price), and poll_fills() counts it there.
+        # Counting it here too doubled it, at the YES price -- the Sep 28 bug (+$11.19 shown, ~+$1.77 real).
         filled_now = bool(resp.get("fill_count"))
-        if filled_now:
-            row["status"] = "filled"
-            row["filled_contracts"] = resp["fill_count"]
-            row["first_fill_at"] = datetime.now(timezone.utc)
-            row["avg_fill_price_cents"] = resp.get("avg_fill_price_cents")
         store.record_live_order(**row)
         if take_now or filled_now:
             return "taken", "%s (bought immediately)" % title
@@ -299,12 +297,7 @@ class LiveRunner:
             notify.send("🔥 [LIVE smoke] rejected: %s\n%s" % (word, reason[:200]))
             return " [smoke REJECTED]"
         row["order_id"] = resp.get("order_id")
-        filled_now = bool(resp.get("fill_count"))
-        if filled_now:
-            row["status"] = "filled"
-            row["filled_contracts"] = resp["fill_count"]
-            row["first_fill_at"] = datetime.now(timezone.utc)
-            row["avg_fill_price_cents"] = resp.get("avg_fill_price_cents")
+        filled_now = bool(resp.get("fill_count"))  # counted later by poll_fills (see _place_one)
         store.record_live_order(**row)
         return " [smoke LIVE TAKEN]" if filled_now else " [smoke LIVE resting]"
 
@@ -365,20 +358,21 @@ class LiveRunner:
             if not is_new:
                 continue
             order = known[str(oid)]
-            already = float(order.get("filled_contracts") or 0)
-            total = already + count
-            prev_px = float(order.get("avg_fill_price_cents") or price)
-            avg_px = ((already * prev_px) + (count * price)) / total if total else price
+            # v3.0.8: the order's totals are always RE-COMPUTED from every fill saved for its
+            # Kalshi order_id (never added on top of what the row already says), so a number
+            # can never be counted twice and a wrong row heals itself on the next fill.
+            tot = store.live_fill_totals(str(oid))
+            total = tot["contracts"]
             store.update_live_order(
                 order["client_order_id"],
-                status="filled" if total >= float(order.get("contracts") or 0) else "resting",
+                status="filled" if total >= float(order.get("contracts") or 0) - 1e-6 else "resting",
                 filled_contracts=total,
-                first_fill_at=order.get("first_fill_at") or clock.now_utc(),
-                avg_fill_price_cents=avg_px, fees_cents=(order.get("fees_cents") or 0) + fee,
+                first_fill_at=tot["first_at"] or order.get("first_fill_at") or clock.now_utc(),
+                avg_fill_price_cents=tot["avg_cents"], fees_cents=tot["fees_cents"],
             )
             order["filled_contracts"] = total
-            order["avg_fill_price_cents"] = avg_px
-            order["fees_cents"] = (order.get("fees_cents") or 0) + fee
+            order["avg_fill_price_cents"] = tot["avg_cents"]
+            order["fees_cents"] = tot["fees_cents"]
             STATE["fills_today"] += 1
             tag = "🔥 [LIVE smoke] " if _is_smoke_row(order) else "✅ [LIVE] "
             taker_flag = " ⚠️ TAKER FILL" if fill.get("is_taker") else ""

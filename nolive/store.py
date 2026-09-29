@@ -527,6 +527,33 @@ def record_live_fill(fill_id: str, **fields: Any) -> bool:
         return (res.rowcount or 0) > 0
 
 
+def live_fill_totals(order_id: str) -> dict:
+    """Sum of every saved real fill for one Kalshi order_id: contracts, weighted NO price, fees."""
+    with engine().connect() as conn:
+        r = conn.execute(text("""
+            select coalesce(sum(contracts), 0) as c,
+                   coalesce(sum(contracts * price_cents), 0) as cost,
+                   coalesce(sum(fee_cents), 0) as fees,
+                   min(created_at) as first_at
+            from nolive_live_fills where order_id = :o
+        """), {"o": order_id}).mappings().first()
+    c = float(r["c"] or 0)
+    return {"contracts": round(c, 4), "avg_cents": (float(r["cost"]) / c) if c > 0 else None,
+            "fees_cents": float(r["fees"] or 0), "first_at": r["first_at"]}
+
+
+def all_live_orders() -> list:
+    with engine().connect() as conn:
+        rows = conn.execute(text("select * from nolive_live_orders order by event_date desc, id")).mappings().all()
+    return [_row(r) for r in rows]
+
+
+def all_live_fills() -> list:
+    with engine().connect() as conn:
+        rows = conn.execute(text("select * from nolive_live_fills order by created_at, id")).mappings().all()
+    return [_row(r) for r in rows]
+
+
 def recent_live_fills(limit: int = 100) -> list:
     with engine().connect() as conn:
         rows = conn.execute(text("select * from nolive_live_fills order by id desc limit :n"),
