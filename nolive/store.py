@@ -513,6 +513,47 @@ def mark_all_live_resting_cancelled(event_date: str) -> int:
     return result.rowcount or 0
 
 
+def stale_live_resting_dates(today: str) -> list:
+    """Earlier days that still have a row marked 'resting' (oldest first)."""
+    with engine().connect() as conn:
+        rows = conn.execute(text("""
+            select distinct event_date from nolive_live_orders
+            where event_date < :d and status = 'resting' order by event_date
+        """), {"d": today}).mappings().all()
+    return [str(r["event_date"])[:10] for r in rows]
+
+
+def mark_stale_live_resting_cancelled(today: str, skip_order_ids=()) -> tuple:
+    """Rows of EARLIER days still marked 'resting' become 'cancelled'; returns (marked, left alone).
+    A row whose Kalshi order_id is in skip_order_ids (still resting on Kalshi) is left alone. The
+    cancel time written is the order's own expiry when the row has one. Never touches a row of
+    today, and sends nothing to Kalshi. Fills already saved on the row are kept."""
+    skip = {str(x) for x in (skip_order_ids or ())}
+    with engine().connect() as conn:
+        rows = conn.execute(text("""
+            select id, order_id, expiration_epoch from nolive_live_orders
+            where event_date < :d and status = 'resting' order by id
+        """), {"d": today}).mappings().all()
+    n = kept = 0
+    for r in rows:
+        if r.get("order_id") and str(r["order_id"]) in skip:
+            kept += 1
+            continue
+        when = clock.now_utc()
+        try:
+            if r.get("expiration_epoch"):
+                when = datetime.fromtimestamp(int(r["expiration_epoch"]), tz=timezone.utc)
+        except Exception:
+            pass
+        with engine().begin() as conn:
+            res = conn.execute(text("""
+                update nolive_live_orders set status = 'cancelled', cancelled_at = :t
+                where id = :i and status = 'resting'
+            """), {"t": _ts(when), "i": r["id"]})
+        n += res.rowcount or 0
+    return n, kept
+
+
 def record_live_fill(fill_id: str, **fields: Any) -> bool:
     params = dict(fields)
     params["created_at"] = _ts(params.get("created_at"))

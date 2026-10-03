@@ -31,7 +31,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import clock, config as C, engine, lease, nofade, notify, store
 from .kalshi import KalshiClient, KalshiError, KalshiPublic, live_book_metrics
@@ -48,6 +48,9 @@ STATE = {
     "fills_today": 0,
     "last_error": None,
     "cancelled_today": False,
+    "day": None,                 # v3.1.1: the CT day this state belongs to (see _tick)
+    "heal_day": None,            # v3.1.1: the day old 'resting' rows were last tidied
+    "heal_retry_at": None,       # v3.1.1: monotonic time of the next try after a failed tidy (None = now)
 }
 
 
@@ -175,7 +178,10 @@ class LiveRunner:
 
         store.update_live_run(event_date, markets_seen=seen, orders_placed=total_live,
                               orders_rejected=total_rejected, collateral=collateral)
-        STATE.update(active_event=event_ticker, active_date=event_date, orders_today=total_live)
+        # v3.1.1: orders placed NOW are not cancelled yet, whatever happened earlier today (a manual
+        # /live_cancel_now before the fire used to leave the flag set, and the backup cancel was skipped).
+        STATE.update(active_event=event_ticker, active_date=event_date, orders_today=total_live,
+                     cancelled_today=False)
 
         header = ("🧪 [LIVE dry_run] orders simulated" if C.LIVE_DRY_RUN
                  else "🎯 [LIVE $%g] orders working" % C.LIVE_DOLLARS_PER_WORD)
@@ -315,14 +321,16 @@ class LiveRunner:
         return True
 
     # ---------------------------------------------------------------- fills
-    def poll_fills(self, event_date: str) -> None:
+    def poll_fills(self, event_date: str) -> bool:
+        """Returns True when Kalshi's fill list was read (or nothing real was ever sent), False when
+        the read failed -- so a caller that is about to close rows knows whether it really looked."""
         if C.LIVE_DRY_RUN and not C.LIVE_SMOKE:
-            return  # nothing real was sent; the paper c1755 variant is the fill proxy for dry_run
+            return True  # nothing real was sent; the paper c1755 variant is the fill proxy for dry_run
         try:
             recent = self.client.get_fills(limit=200)
         except Exception as exc:
             log.warning("live fill poll failed: %s", exc)
-            return
+            return False
 
         # v3.0.6: match each fill to OUR order by Kalshi order_id, not by ticker. The same Kalshi
         # account also runs no-fade (buy NO 26c on every word) and gap Book L, so a ticker match
@@ -378,6 +386,34 @@ class LiveRunner:
             taker_flag = " ⚠️ TAKER FILL" if fill.get("is_taker") else ""
             notify.send("%sFilled: %s\n%g contracts NO @ %d¢%s"
                         % (tag, order.get("word") or ticker, count, price, taker_flag))
+        return True
+
+    # ---------------------------------------------------------------- old rows
+    def heal_old_rows(self, today: str) -> int:
+        """v3.1.1: rows of EARLIER days still marked 'resting' (the cancel mark was missed: a skipped
+        backup cancel, or the process was down). Before closing them it looks at Kalshi: fills are
+        read first so a late fill is never lost, and a row whose order is STILL resting on Kalshi is
+        left alone and reported loudly. Raises when Kalshi could not be read; the caller tries again
+        later. Sends no order and no cancel."""
+        dates = store.stale_live_resting_dates(today)
+        if not dates:
+            return 0
+        still_live: set = set()
+        if not (C.LIVE_DRY_RUN and not C.LIVE_SMOKE):
+            for d in dates:
+                if not self.poll_fills(d):
+                    raise RuntimeError("could not read fills for %s" % d)
+            still_live = {str(o["order_id"]) for o in self.client.get_resting_orders(series_prefix=C.SERIES)
+                          if o.get("order_id")}
+        healed, kept = store.mark_stale_live_resting_cancelled(today, skip_order_ids=still_live)
+        if kept:
+            notify.send("🚨 [LIVE] %d order(s) from an earlier day are STILL RESTING on Kalshi. "
+                        "Check Kalshi and cancel them by hand." % kept)
+            store.log_activity("live_heal_alert", "%d old order(s) still resting on Kalshi" % kept)
+        if healed:
+            store.log_activity("live_heal", "%d old order row(s) from %s marked cancelled (not resting on Kalshi)"
+                               % (healed, ", ".join(dates)))
+        return healed
 
     # ---------------------------------------------------------------- cancel
     def cancel_all(self, event_date: str | None = None, reason: str = "scheduled") -> dict:
@@ -421,6 +457,10 @@ class LiveRunner:
             summary["verified"] = False
             log.error("live: cancel verification failed: %s", exc)
 
+        try:
+            self.poll_fills(event_date)      # v3.1.1: one last look, so a fill in the final seconds is never missed
+        except Exception:
+            log.exception("live: last fill poll before the cancel mark failed")
         store.mark_all_live_resting_cancelled(event_date)
         store.update_live_run(event_date, cancelled_at=datetime.now(timezone.utc),
                               cancel_verified=summary["verified"])
@@ -466,9 +506,23 @@ class LiveRunner:
         today = clock.today_ct()
         STATE["last_poll"] = now
 
-        if STATE["active_date"] and STATE["active_date"] != today:
-            STATE.update(active_event=None, active_date=None, orders_today=0,
+        # v3.1.1: a new day ALWAYS starts clean. Before, this reset only ran while active_date was
+        # still set, and the cancel clears active_date -- so "cancelled_today" stayed True into the
+        # next day and that day's in-app backup cancel was skipped (Oct 2: six orders left 'resting'
+        # in the ledger; Kalshi's own expiry had removed them). Only a restart cleared it.
+        if STATE.get("day") != today:
+            STATE.update(day=today, active_event=None, active_date=None, orders_today=0,
                          fills_today=0, cancelled_today=False)
+        # Tidy rows an earlier day left 'resting'. Never in the minutes around the fire: the fire comes first.
+        busy = clock.fire_at(today) - timedelta(seconds=300) <= now <= clock.live_app_cancel_at(today)
+        if (not busy and STATE.get("heal_day") != today
+                and (STATE.get("heal_retry_at") is None or time.monotonic() >= STATE["heal_retry_at"])):
+            try:
+                self.heal_old_rows(today)
+                STATE.update(heal_day=today, heal_retry_at=None)
+            except Exception as exc:
+                log.warning("live: could not tidy old resting rows (will try again): %s", exc)
+                STATE["heal_retry_at"] = time.monotonic() + 600
 
         # Kalshi's own server-side expiry (baked into each order) fires at LIVE_CANCEL_CT itself.
         # This in-app backup deliberately fires a bit LATER (live_app_cancel_at), so it never races
