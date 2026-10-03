@@ -18,7 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-from . import analytics, clock, config as C, engine, nofade, notify, settle, store
+from . import analytics, clock, config as C, engine, lease, nofade, notify, settle, store
 from .kalshi import KalshiPublic, count_needed, market_prices, word_from_market
 
 log = logging.getLogger("nolive.pipeline")
@@ -636,6 +636,9 @@ def run_forever() -> None:
     STATE["started"] = clock.now_utc()
     r = runner()
     while True:
+        if not lease.running():      # another place holds the worker lease: do nothing here
+            time.sleep(5)
+            continue
         try:
             r.tick()
         except Exception as exc:

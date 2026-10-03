@@ -47,7 +47,7 @@ def _num(name: str, default: float) -> float:
         return default
 
 
-VERSION = "wnt-nolive-v3.0.8"    # bump this every release; it shows on the dashboard and in Telegram
+VERSION = "wnt-nolive-v3.1.0"    # bump this every release; it shows on the dashboard and in Telegram
 CT = ZoneInfo("America/Chicago")
 
 SERIES = _secret("SERIES", "KXWORLDNEWSMENTION")

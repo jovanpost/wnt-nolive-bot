@@ -7,14 +7,13 @@ only after Kalshi publishes the official result.
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import timedelta
 
 import pandas as pd
 import streamlit as st
 
 import mdkit
-from nolive import analytics, clock, config as C, live, notify, pipeline, store
+from nolive import analytics, clock, config as C, live, pipeline, runtime, store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s")
 
@@ -23,14 +22,10 @@ st.set_page_config(page_title="WNT Post-Cold-Open", page_icon="🕔", layout="wi
 
 @st.cache_resource
 def boot():
-    store.init_db()
-    pipeline.register_commands()
-    live.register_commands()
-    notify.start_listener()
-    threading.Thread(target=pipeline.run_forever, name="nolive-loop", daemon=True).start()
-    if live.enabled():
-        threading.Thread(target=live.run_forever, name="nolive-live-loop", daemon=True).start()
-    return {"started_at": clock.now_ct().isoformat(), "live_enabled": live.enabled()}
+    """Once per app process. The loops start only if RUN_WORKERS is on AND this place holds the
+    worker lease (nolive/runtime.py); otherwise this page is a dashboard."""
+    info = runtime.start_workers(where="streamlit")
+    return {"started_at": clock.now_ct().isoformat(), "live_enabled": live.enabled(), "run_workers": info["run_workers"]}
 
 
 if st.query_params.get("ping") == "true":     # the keep-alive workflow hits this
@@ -85,6 +80,9 @@ today_run = next((r for r in runs if r["event_date"] == today), None)
 settled_nights = len(set(o["event_date"] for o in orders if o.get("pnl_cents") is not None))
 
 st.title("🕔 WNT Post-Cold-Open")
+_lvl, _txt = runtime.banner()
+if _lvl != "ok":
+    {"info": st.info, "warning": st.warning, "error": st.error}[_lvl](_txt)
 _sz = C.sized_contracts()
 st.caption(
     "%s · paper: $%g/word -> %.2f contracts%s, %d cancel-time versions · live: %s"

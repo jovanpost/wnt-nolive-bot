@@ -24,7 +24,7 @@ import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-from . import config as C
+from . import config as C, lease
 
 log = logging.getLogger("nolive.kalshi")
 
@@ -380,6 +380,7 @@ class KalshiClient:
     def create_no_order(self, ticker: str, no_price_cents: int, count: float, client_order_id: str,
                         post_only: bool = True, expiration_epoch: int | None = None) -> dict:
         """SELL YES at (100 - no_price_cents) = BUY NO at no_price_cents. Same body wnt-nofade-bot sends."""
+        lease.require("send a real order")   # only the place that holds the worker lease may send
         yes_price = 100 - int(no_price_cents)
         body = {
             "ticker": ticker,

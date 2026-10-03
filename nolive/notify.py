@@ -12,7 +12,7 @@ from typing import Callable
 
 import requests
 
-from . import config as C
+from . import config as C, lease
 
 log = logging.getLogger("nolive.notify")
 
@@ -60,6 +60,9 @@ def _allowed(chat_id) -> bool:
 def _listen_loop() -> None:
     offset = None
     while True:
+        if not lease.running():      # another place holds the worker lease: it answers the commands
+            time.sleep(5)
+            continue
         try:
             params = {"timeout": 30, "allowed_updates": ["message"]}
             if offset is not None:

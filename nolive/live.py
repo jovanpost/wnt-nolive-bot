@@ -33,7 +33,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from . import clock, config as C, engine, nofade, notify, store
+from . import clock, config as C, engine, lease, nofade, notify, store
 from .kalshi import KalshiClient, KalshiError, KalshiPublic, live_book_metrics
 from .kalshi import count_needed, market_prices, word_from_market
 
@@ -448,6 +448,9 @@ class LiveRunner:
         notify.send("🤖 [LIVE] engine started\n%s" % C.live_summary())
         store.log_activity("live_start", C.live_summary())
         while not getattr(self, "_stop", False):
+            if not lease.running():  # another place holds the worker lease: do nothing here
+                time.sleep(5)
+                continue
             try:
                 self._tick()
             except Exception as exc:
